@@ -49,7 +49,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 JST = datetime.timezone(datetime.timedelta(hours=9))
 
 # 状態記録用（これらは再起動で消えても大きな問題はないもの）
-join_times = {}
+#join_times = {}
 
 # ============================================
 # 💾 データの永続化（再起動対策）
@@ -59,12 +59,21 @@ DATA_FILE = "vc_data.json"
 
 def load_data():
     """ファイルからデータを読み込む"""
-    global total_times, monthly_times
+    global total_times, monthly_times, join_times  # 💡join_times を追加
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 saved_data = json.load(f)
                 total_times = {int(k): v for k, v in saved_data.get("total", {}).items()}
+                
+                # 💡ここから追加：保存された入室時間を復元（文字列からdatetimeに戻す）
+                raw_join = saved_data.get("join_times", {})
+                join_times = {}
+                for uid_str, time_str in raw_join.items():
+                    join_times[int(uid_str)] = datetime.datetime.fromisoformat(time_str)
+                # 💡ここまで追加
+
+                
                 # jsonはキーが文字列になるため、intや年月に復元する
                 raw_monthly = saved_data.get("monthly", {})
                 monthly_times = {}
@@ -87,7 +96,14 @@ def save_data():
     """データをファイルに保存する"""
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump({"total": total_times, "monthly": monthly_times}, f, ensure_ascii=False, indent=4)
+            # 💡datetimeオブジェクトはそのまま保存できないので文字列(isoformat)に変換する
+            serializable_join = {k: v.isoformat() for k, v in join_times.items()}
+            
+            json.dump({
+                "total": total_times, 
+                "monthly": monthly_times,
+                "join_times": serializable_join  # 💡ここに追加
+            }, f, ensure_ascii=False, indent=4)
     except Exception as e:
         print(f"データ保存エラー: {e}")
 
@@ -128,7 +144,8 @@ async def on_voice_state_update(member, before, after):
 
     # 参加
     if before.channel is None and after.channel is not None:
-        join_times[member.id] = datetime.datetime.now(JST)  # 日本時間
+        join_times[member.id] = datetime.datetime.now(JST)
+        save=discord.Embed()  # 日本時間
 
         embed = discord.Embed(
             description=f"🟢 **{member.display_name}** が **{after.channel.name}** に参加しました",
