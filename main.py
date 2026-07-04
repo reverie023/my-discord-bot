@@ -104,7 +104,6 @@ async def on_ready():
     print(f"ログインしました: {bot.user}")
     channel = bot.get_channel(CHANNEL_ID)
     if channel:
-        await channel.send("Botがオンラインになりました！")
 
     # タスクが既に動いていないか確認して起動
     if not auto_monthly_report.is_running():
