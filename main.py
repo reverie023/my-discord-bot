@@ -1,4 +1,4 @@
-# --- コードの一番上に追加 ---
+# --- コードの一番上 ---
 from flask import Flask
 from threading import Thread
 
@@ -18,15 +18,14 @@ def keep_alive():
 import os
 import datetime
 import io
-import json  # データ保存用に追加
+import json
 import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 import matplotlib.pyplot as plt
-
-# 日本語フォント設定（Linuxサーバー対策）
 import matplotlib
 
+# 日本語フォント設定
 matplotlib.rcParams["font.family"] = "sans-serif"
 matplotlib.rcParams["font.sans-serif"] = [
     "Noto Sans CJK JP",
@@ -48,33 +47,25 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 # タイムゾーンを日本時間に固定
 JST = datetime.timezone(datetime.timedelta(hours=9))
 
-# 状態記録用（これらは再起動で消えても大きな問題はないもの）
-#join_times = {}
-
-# ============================================
-# 💾 データの永続化（再起動対策）
-# ============================================
+# 💾 データの永続化設定
 DATA_FILE = "vc_data.json"
 
+total_times = {}
+monthly_times = {}
+join_times = {}  # 再起動でも消えないようにここに用意
 
 def load_data():
     """ファイルからデータを読み込む"""
-    global total_times, monthly_times, join_times  # 💡join_times を追加
+    global total_times, monthly_times, join_times
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 saved_data = json.load(f)
+                
+                # トータル時間の復元
                 total_times = {int(k): v for k, v in saved_data.get("total", {}).items()}
                 
-                # 💡ここから追加：保存された入室時間を復元（文字列からdatetimeに戻す）
-                raw_join = saved_data.get("join_times", {})
-                join_times = {}
-                for uid_str, time_str in raw_join.items():
-                    join_times[int(uid_str)] = datetime.datetime.fromisoformat(time_str)
-                # 💡ここまで追加
-
-                
-                # jsonはキーが文字列になるため、intや年月に復元する
+                # 月別時間の復元
                 raw_monthly = saved_data.get("monthly", {})
                 monthly_times = {}
                 for y_str, months in raw_monthly.items():
@@ -83,6 +74,16 @@ def load_data():
                         monthly_times[int(y_str)][int(m_str)] = {
                             int(uid): sec for uid, sec in users.items()
                         }
+                
+                # 入室時間の復元（文字列からdatetimeオブジェクトに変換）
+                raw_join = saved_data.get("join_times", {})
+                join_times = {}
+                for uid_str, time_str in raw_join.items():
+                    try:
+                        join_times[int(uid_str)] = datetime.datetime.fromisoformat(time_str)
+                    except:
+                        pass
+                        
                 print("データをファイルから読み込みました。")
                 return
         except Exception as e:
@@ -90,23 +91,23 @@ def load_data():
 
     total_times = {}
     monthly_times = {}
-
+    join_times = {}
 
 def save_data():
     """データをファイルに保存する"""
+    global total_times, monthly_times, join_times
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
-            # 💡datetimeオブジェクトはそのまま保存できないので文字列(isoformat)に変換する
-            serializable_join = {k: v.isoformat() for k, v in join_times.items()}
+            # datetimeオブジェクトを文字列に変換して保存できるようにする
+            serializable_join = {str(k): v.isoformat() for k, v in join_times.items()}
             
             json.dump({
                 "total": total_times, 
                 "monthly": monthly_times,
-                "join_times": serializable_join  # 💡ここに追加
+                "join_times": serializable_join
             }, f, ensure_ascii=False, indent=4)
     except Exception as e:
         print(f"データ保存エラー: {e}")
-
 
 # 最初にデータを読み込む
 load_data()
@@ -122,7 +123,6 @@ async def on_ready():
     if channel:
         pass
 
-    # タスクが既に動いていないか確認して起動
     if not auto_monthly_report.is_running():
         auto_monthly_report.start()
 
@@ -145,7 +145,7 @@ async def on_voice_state_update(member, before, after):
     # 参加
     if before.channel is None and after.channel is not None:
         join_times[member.id] = datetime.datetime.now(JST)
-        save=discord.Embed()  # 日本時間
+        save_data()  # 参加時間を即座にファイルへ保存
 
         embed = discord.Embed(
             description=f"🟢 **{member.display_name}** が **{after.channel.name}** に参加しました",
@@ -158,7 +158,11 @@ async def on_voice_state_update(member, before, after):
         start = join_times.get(member.id)
 
         if start:
-            end = datetime.datetime.now(JST)  # 日本時間
+            # もしタイムゾーンがついていなければ日本時間を付与
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=JST)
+                
+            end = datetime.datetime.now(JST)
             duration = end - start
             seconds = int(duration.total_seconds())
 
@@ -178,7 +182,8 @@ async def on_voice_state_update(member, before, after):
                 monthly_times[year][month].get(member.id, 0) + seconds
             )
 
-            # 💡 退出が記録されたらファイルに保存する
+            # ユーザーの入室記録を消去して保存
+            join_times.pop(member.id, None)
             save_data()
 
             minutes = seconds // 60
@@ -203,17 +208,17 @@ async def on_voice_state_update(member, before, after):
             embed.add_field(name="累計通話時間", value=f"**{total_min}分 {total_sec}秒**", inline=False)
 
             await channel.send(embed=embed)
-            join_times.pop(member.id, None)
 
         else:
+            # 万が一データが消えていた場合のセーフティ
             embed = discord.Embed(
-                description=f"🔴 **{member.display_name}** が **{before.channel.name}** から退出しました",
+                description=f"🔴 **{member.display_name}** が **{before.channel.name}** から退出しました (長時間の通話のため、時間が計測できませんでした)",
                 color=discord.Color.red(),
             )
             await channel.send(embed=embed)
 
     # 移動
-    elif before.channel.id != after.channel.id:
+    elif before.channel is not None and after.channel is not None and before.channel.id != after.channel.id:
         embed = discord.Embed(
             description=f"🟡 **{member.display_name}** が **{before.channel.name}** → **{after.channel.name}** に移動しました",
             color=discord.Color.yellow(),
@@ -259,16 +264,15 @@ async def post_monthly_rank(channel, year, month, is_progress=False):
 
 
 # ============================================
-# 自動投稿タスク（日本時間基準に修正）
+# 自動投稿タスク
 # ============================================
 @tasks.loop(minutes=1)
 async def auto_monthly_report():
-    now = datetime.datetime.now(JST)  # 日本時間
+    now = datetime.datetime.now(JST)
     rank_channel = bot.get_channel(RANK_CHANNEL_ID)
     if not rank_channel:
         return
 
-    # 毎月1日 00:00 → 先月のランキング
     if now.day == 1 and now.hour == 0 and now.minute == 0:
         year = now.year
         month = now.month - 1
@@ -277,7 +281,6 @@ async def auto_monthly_report():
             month = 12
         await post_monthly_rank(rank_channel, year, month)
 
-    # 毎月10日・20日・30日 → 途中経過
     if now.day in [10, 20, 30] and now.hour == 0 and now.minute == 0:
         await post_monthly_rank(rank_channel, now.year, now.month, is_progress=True)
 
@@ -327,7 +330,6 @@ async def vcrank_graph_slash(interaction: discord.Interaction):
         await interaction.response.send_message("今月の通話記録はまだありません。")
         return
 
-    # 遅延対策の応答
     await interaction.response.defer()
 
     data = monthly_times[year][month]
@@ -352,7 +354,7 @@ async def vcrank_graph_slash(interaction: discord.Interaction):
     plt.xlabel("通話時間（時間）")
     plt.title(f"{year}年{month}月 通話時間ランキング（グラフ）")
     plt.gca().invert_yaxis()
-    plt.tight_layout()  # 文字切れ対策
+    plt.tight_layout()
 
     buf = io.BytesIO()
     plt.savefig(buf, format="png")
@@ -361,7 +363,6 @@ async def vcrank_graph_slash(interaction: discord.Interaction):
 
     file = discord.File(buf, filename="vcrank_graph.png")
     await interaction.followup.send(file=file)
-# --- コードの一番下（bot.run の手前）に追加 ---
+
 keep_alive()
 bot.run(TOKEN)
-
