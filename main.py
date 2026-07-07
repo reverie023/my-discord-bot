@@ -5,6 +5,28 @@ import asyncio
 import json
 import os
 import time
+from flask import Flask
+import threading
+
+# --- 🌐 【最優先】Renderスリープ防止用 Webサーバー起動 ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+def run_web_server():
+    # Renderが指定するポート番号を取得（デフォルトは10000）
+    port = int(os.getenv("PORT", 10000))
+    print(f"🌐 1. ポート {port} でWebサーバーを最優先起動します...")
+    app.run(host='0.0.0.0', port=port)
+
+# Discordのログインを待たずに、即座にWebサーバーを別スレッドで起動してポートを開ける
+web_thread = threading.Thread(target=run_web_server, daemon=True)
+web_thread.start()
+# -----------------------------------------------------
+
+print("🤖 2. 次にDiscordボットの初期設定を開始します...")
 
 # ボットの初期設定
 intents = discord.Intents.default()
@@ -24,7 +46,6 @@ CHANNEL_CALL_LOG = "通話履歴"
 DATA_FILE = "data.json"
 user_data = {}
 
-# ⏱️ 通話時間を記録する一時メモリ
 call_start_times = {}
 
 def load_data():
@@ -52,7 +73,6 @@ def get_user_profile(user_id):
         save_data()
     return user_data[uid_str]
 
-# 【チャンネル制限チェック】
 async def check_channel(ctx, target_channel_name):
     if ctx.channel.name == target_channel_name:
         return True
@@ -65,7 +85,6 @@ async def check_channel(ctx, target_channel_name):
         pass
     return False
 
-# ログ送信ヘルパー
 async def send_call_log(guild, text):
     channel = discord.utils.get(guild.text_channels, name=CHANNEL_CALL_LOG)
     if channel:
@@ -77,21 +96,18 @@ async def on_ready():
     load_data()
     reset_race()
     
-    # 💡 ボット起動時にすでに通話にいる人を救済（起動した瞬間からカウント）
     now = time.time()
     for guild in bot.guilds:
         for voice_channel in guild.voice_channels:
             for member in voice_channel.members:
                 if not member.bot:
                     call_start_times[member.id] = now
-                    # 起動時入室の最低保証10コイン
                     profile = get_user_profile(member.id)
                     profile["coins"] += 10
     save_data()
     
     income_timer.start()
 
-# --- 🪙 通話報酬システム (1分ごとに裏で10コイン追加、通知はなし) ---
 @tasks.loop(minutes=1.0)
 async def income_timer():
     updated = False
@@ -106,20 +122,17 @@ async def income_timer():
     if updated:
         save_data()
 
-# --- 🎤 ボイスチャンネル監視（通話終了時のみログを出す） ---
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot:
         return
 
-    # パターン1: 通話に参加したとき（裏で時間記録と最低保証のみ）
     if before.channel is None and after.channel is not None:
         profile = get_user_profile(member.id)
         profile["coins"] += 10
         save_data()
         call_start_times[member.id] = time.time()
 
-    # パターン2: 通話を完全に終了（退出）したとき 💡ここで初めてログを出す
     elif before.channel is not None and after.channel is None:
         start_time = call_start_times.pop(member.id, None)
         
@@ -134,7 +147,6 @@ async def on_voice_state_update(member, before, after):
                 f"⏱️ 通話時間: 約 **{duration_minutes}分** / 🪙 合計獲得: **+{earned_coins}コイン**"
             )
 
-# --- 💳 コマンド: お財布確認 (ステータス専用) ---
 @bot.command(name="wallet")
 async def wallet(ctx):
     if not await check_channel(ctx, CHANNEL_STATUS): return
@@ -145,7 +157,6 @@ async def wallet(ctx):
     embed.add_field(name="🛡️ お守りカード", value=f"**{profile['shields']}** 枚", inline=True)
     await ctx.send(embed=embed)
 
-# --- 🎰 コマンド: ガチャ (ガチャ専用) ---
 @bot.command(name="gacha")
 async def gacha(ctx):
     if not await check_channel(ctx, CHANNEL_GACHA): return
@@ -179,7 +190,6 @@ async def gacha(ctx):
     embed = discord.Embed(title="🎰 ガチャ結果", description=result_text, color=color)
     await ctx.send(embed=embed)
 
-# --- 🦹 コマンド: 泥棒 (ガチャ専用) ---
 @bot.command(name="steal")
 async def steal(ctx, target: discord.Member):
     if not await check_channel(ctx, CHANNEL_GACHA): return
@@ -226,7 +236,6 @@ async def steal(ctx, target: discord.Member):
         try: await target.send(f"🚨 **警告：泥棒被害！**\n誰かに **{stolen_coins}コイン** 盗まれました！")
         except: pass
 
-# --- 🎲 ゲーム1: ちんちろ (賭け場専用) ---
 def get_chinchiro_eye():
     dice = [random.randint(1, 6) for _ in range(3)]
     dice.sort()
@@ -279,7 +288,6 @@ async def chinchiro(ctx, bet: int):
     
     save_data()
 
-# --- 🐴 ゲーム2: カジノ競馬 (賭け場専用) ---
 horses = {1: "🐴ドロボウキング", 2: "🐴オマモリマル", 3: "🐴チンチロマスター", 4: "🐴コゼニデント"}
 horse_odds = {1: 4.0, 2: 4.0, 3: 4.0, 4: 4.0}
 race_bets = {}
@@ -376,7 +384,7 @@ async def race_start(ctx):
     reset_race()
     race_active = False
 
-# --- ⚙️ Render用環境変数読み込み部（修正済） ---
+print("🚀 3. 最後にDiscordへログイン接続します...")
 TOKEN = os.getenv("DISCORD_TOKEN")
 if TOKEN:
     bot.run(TOKEN)
