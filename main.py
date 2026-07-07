@@ -21,14 +21,12 @@ intents.message_content = True
 intents.voice_states = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-CHANNELS = {"GACHA": "ガチャ", "GAMBLE": "賭け場", "STATUS": "ステータス", "LOG": "通話履歴"}
-race_bets, call_start_times = {}, {}
+race_bets = {}
 horses = {1: "🐴ドロボウキング", 2: "🐴オマモリマル", 3: "🐴チンチロマスター", 4: "🐴コゼニデント"}
-
 DATA_FILE = "data.json"
 user_data = {}
 
-# --- ニックネーム更新 ---
+# --- 🛠️ 共通関数 ---
 async def update_nickname(member: discord.Member, coins: int):
     try:
         original_name = member.display_name.split('：')[0]
@@ -73,63 +71,97 @@ async def on_ready():
     print(f"✅ 起動完了！")
 
 # --- 🎮 コマンド ---
+
+@bot.tree.command(name="wallet", description="所持金と持ち物を自分だけ確認")
+async def wallet(interaction: discord.Interaction):
+    p = get_user_profile(interaction.user.id)
+    msg = f"💰 所持金: {p['coins']}コイン\n🎫 チケット: {p['tickets']}枚\n🛡️ お守り: {p['shields']}個"
+    await interaction.response.send_message(msg, ephemeral=True)
+
 @bot.tree.command(name="gacha", description="ガチャ")
 async def gacha(interaction: discord.Interaction):
     p = get_user_profile(interaction.user.id)
-    if p["coins"] < 100: return await interaction.response.send_message("❌ 不足", ephemeral=True)
+    if p["coins"] < 100: return await interaction.response.send_message("❌ コイン不足", ephemeral=True)
+    
     p["coins"] -= 100
-    res = "ハズレ"
-    if random.randint(1, 100) <= 90: p["coins"] += random.randint(30, 120); res = "当たり"
+    roll = random.randint(1, 100)
+    
+    # 48:20:32 のバランス設定
+    if roll <= 48:
+        win = random.randint(50, 300)
+        p["coins"] += win
+        res = f"🎉 {win}コイン"
+    elif roll <= 68: # 48 + 20 = 68
+        p["shields"] += 1
+        res = "🛡️ お守り"
+    else: # 残り32
+        p["tickets"] += 1
+        res = "🎫 泥棒チケット"
+        
     save_data()
     await update_nickname(interaction.user, p["coins"])
-    await interaction.response.send_message(f"🎰 結果: {res}", ephemeral=True)
+    await interaction.response.send_message(f"🎰 結果: {res} をゲット！", ephemeral=True)
 
 @bot.tree.command(name="steal", description="泥棒")
 async def steal(interaction: discord.Interaction, target: discord.Member):
     p, t = get_user_profile(interaction.user.id), get_user_profile(target.id)
-    if p["tickets"] < 1: return await interaction.response.send_message("❌ チケット不足")
+    if p["tickets"] < 1: return await interaction.response.send_message("❌ チケット不足", ephemeral=True)
     p["tickets"] -= 1
     stolen = random.randint(50, 200)
     t["coins"] -= stolen; p["coins"] += stolen
     save_data()
     await update_nickname(interaction.user, p["coins"])
     await update_nickname(target, t["coins"])
-    await interaction.response.send_message(f"🦹 {stolen}コイン奪った")
+    await interaction.response.send_message(f"🦹 {stolen}コイン奪った", ephemeral=True)
 
 @bot.tree.command(name="chinchiro", description="チンチロ")
 async def chinchiro(interaction: discord.Interaction, bet: int):
     p = get_user_profile(interaction.user.id)
-    if p["coins"] < bet: return await interaction.response.send_message("❌ 不足")
+    if p["coins"] < bet: return await interaction.response.send_message("❌ 不足", ephemeral=True)
     p["coins"] += random.choice([-bet, bet])
     save_data()
     await update_nickname(interaction.user, p["coins"])
-    await interaction.response.send_message("🎲 決着！")
+    await interaction.response.send_message(f"🎲 決着！", ephemeral=True)
 
 @bot.tree.command(name="race_bet", description="競馬")
 async def race_bet(interaction: discord.Interaction, horse_num: int, bet: int):
     cid = interaction.channel.id
     if cid not in race_bets: race_bets[cid] = {}
     p = get_user_profile(interaction.user.id)
-    if p["coins"] < bet: return await interaction.response.send_message("❌ 不足")
+    if p["coins"] < bet: return await interaction.response.send_message("❌ 不足", ephemeral=True)
     p["coins"] -= bet; race_bets[cid][interaction.user.id] = {"horse": horse_num, "bet": bet}
     save_data()
     await update_nickname(interaction.user, p["coins"])
-    await interaction.response.send_message(f"🏁 賭けました")
+    await interaction.response.send_message(f"🏁 {horses[horse_num]} に賭けました", ephemeral=True)
 
 @bot.tree.command(name="race_start", description="レース開始")
 async def race_start(interaction: discord.Interaction):
     cid = interaction.channel.id
-    if not race_bets.get(cid): return await interaction.response.send_message("❌ 誰も賭けていません")
-    await interaction.response.send_message("🟢 レーススタート！！")
-    # (中略: レース進行ロジック)
-    winner = random.randint(1, 4)
+    if not race_bets.get(cid): return await interaction.response.send_message("❌ 誰も賭けていません", ephemeral=True)
+    
+    total_pool = sum(b['bet'] for b in race_bets[cid].values())
+    horse_bets = {1:0, 2:0, 3:0, 4:0}
+    for b in race_bets[cid].values(): horse_bets[b['horse']] += b['bet']
+    
+    odds_text = "\n".join([f"{horses[h]}: {round(total_pool/pool, 1) if pool>0 else 0}倍" for h, pool in horse_bets.items()])
+    await interaction.response.send_message(f"🟢 レース開始！\n【オッズ】\n{odds_text}")
+    msg = await interaction.followup.send("🏁 実況: レースが始まりました！")
+    
+    progress = {1:0, 2:0, 3:0, 4:0}
+    for _ in range(15):
+        await asyncio.sleep(1.0)
+        for h in progress: progress[h] += random.randint(0, 3)
+        await msg.edit(content=f"🏁 実況中...\n" + "\n".join([f"{horses[h]}: {'・'*progress[h]}🏇" for h in progress]))
+    
+    winner = max(progress, key=progress.get)
     await interaction.followup.send(f"👑 優勝は {horses[winner]}！")
+    
     for u_id, b in race_bets[cid].items():
         if b["horse"] == winner: 
             p = get_user_profile(u_id)
-            p["coins"] += b["bet"] * 3
-            member = interaction.guild.get_member(u_id)
-            if member: await update_nickname(member, p["coins"])
+            p["coins"] += int(b["bet"] * (total_pool / horse_bets[winner]))
+            m = interaction.guild.get_member(u_id)
+            if m: await update_nickname(m, p["coins"])
     race_bets[cid] = {}; save_data()
 
 bot.run(os.getenv("DISCORD_TOKEN"))
