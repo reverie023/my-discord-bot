@@ -1,13 +1,13 @@
 import discord
 from discord.ext import commands, tasks
-from discord import app_commands  # ★この行を新しく追加しました！
+from discord import app_commands
 import random
 import asyncio
-import json
 import os
 import time
 from flask import Flask
 import threading
+from supabase import create_client, Client
 
 # --- 🌐 Webサーバー ---
 app = Flask('')
@@ -26,8 +26,11 @@ CHANNELS = {"GACHA": "ガチャ", "GAMBLE": "賭け場", "STATUS": "ステータ
 race_bets = {}
 call_start_times = {}
 horses = {1: "🐴ドロボウキング", 2: "🐴オマモリマル", 3: "🐴チンチロマスター", 4: "🐴コゼニデント"}
-DATA_FILE = "data.json"
-user_data = {}
+
+# --- 💾 Supabase 接続設定 ---
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # --- 🛠️ 共通関数 ---
 async def update_nickname(member: discord.Member, coins: int):
@@ -45,22 +48,34 @@ async def check_channel(interaction: discord.Interaction, target_key):
         return False
     return True
 
-def load_data():
-    global user_data
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            user_data = json.load(f)
+def get_user_profile(user_id: int) -> dict:
+    """Supabaseからユーザーデータを取得。存在しない場合は新規作成"""
+    try:
+        response = supabase.table("user_profiles").select("*").eq("user_id", user_id).execute()
+        if response.data:
+            return response.data[0]
+        
+        # データがない場合は新規登録（初期値: コイン1000枚）
+        new_profile = {"user_id": user_id, "coins": 1000, "shields": 0, "tickets": 0}
+        supabase.table("user_profiles").insert(new_profile).execute()
+        return new_profile
+    except Exception as e:
+        print(f"データ取得エラー: {e}")
+        return {"user_id": user_id, "coins": 0, "shields": 0, "tickets": 0}
 
-def save_data():
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(user_data, f, ensure_ascii=False, indent=4)
-
-def get_user_profile(user_id):
-    uid_str = str(user_id)
-    if uid_str not in user_data:
-        user_data[uid_str] = {"coins": 1000, "tickets": 0, "shields": 0}
-        save_data()
-    return user_data[uid_str]
+def save_supabase_data(user_id: int, data: dict):
+    """特定のユーザーのデータをSupabaseに即時保存する"""
+    try:
+        # 保存用にデータを整形（user_idを固定）
+        save_data = {
+            "user_id": user_id,
+            "coins": data.get("coins", 1000),
+            "shields": data.get("shields", 0),
+            "tickets": data.get("tickets", 0)
+        }
+        supabase.table("user_profiles").update(save_data).eq("user_id", user_id).execute()
+    except Exception as e:
+        print(f"データ保存エラー: {e}")
 
 # --- 🎤 通話報酬 ---
 @tasks.loop(minutes=1.0)
@@ -71,20 +86,18 @@ async def income_timer():
                 if not member.bot:
                     p = get_user_profile(member.id)
                     p["coins"] += 10
+                    save_supabase_data(member.id, p)  # Supabaseに保存
                     await update_nickname(member, p["coins"])
-    save_data()
 
 @bot.event
 async def on_ready():
     await bot.tree.sync()
-    load_data()
     income_timer.start()
     
     # 起動時に通話中のメンバーを検知
     for guild in bot.guilds:
         for vc in guild.voice_channels:
             for member in vc.members:
-                # メンバーがNoneだったり、botだったりする場合を考慮して安全に記録
                 if member and not member.bot:
                     call_start_times[member.id] = time.time()
     
@@ -107,9 +120,7 @@ async def gacha(interaction: discord.Interaction):
     p["coins"] -= 100
     roll = random.randint(1, 100)
     
-    # 🎰 新排出率: コイン 50% : ハズレ 35% : アイテム 15%
     if roll <= 50:
-        # コイン当選の中の判定（2%で超大当たり）
         if random.randint(1, 100) <= 2:
             win = random.randint(2300, 2500)
             res = f"💎✨ 超超超大当たり！ {win}コイン"
@@ -118,11 +129,9 @@ async def gacha(interaction: discord.Interaction):
             res = f"🎉 {win}コイン"
         p["coins"] += win
         
-    elif roll <= 85: # 50 + 35 = 85
-        # 35%でハズレ
+    elif roll <= 85:
         res = "💨 ハズレ"
     else:
-        # 残り15%でアイテム（お守りかチケット）
         item_type = random.choice(["お守り", "泥棒チケット"])
         if item_type == "お守り":
             p["shields"] += 1
@@ -131,7 +140,7 @@ async def gacha(interaction: discord.Interaction):
             p["tickets"] += 1
             res = "🎫 泥棒チケット"
         
-    save_data()
+    save_supabase_data(interaction.user.id, p)  # Supabaseに保存
     await update_nickname(interaction.user, p["coins"])
     await interaction.response.send_message(f"🎰 結果: {res} をゲット！\n💰 残金: {p['coins']}コイン", ephemeral=True)
         
@@ -143,19 +152,32 @@ async def steal(interaction: discord.Interaction, target: discord.Member):
     p["tickets"] -= 1
     stolen = random.randint(50, 200)
     t["coins"] -= stolen; p["coins"] += stolen
-    save_data()
+    
+    save_supabase_data(interaction.user.id, p)  # 自分のデータを保存
+    save_supabase_data(target.id, t)            # 相手のデータを保存
+    
     await update_nickname(interaction.user, p["coins"])
     await update_nickname(target, t["coins"])
     await interaction.response.send_message(f"🦹 {stolen}コイン奪った", ephemeral=True)
 
-chinchiro_rooms = {}  # ★この1行を追加してください！
+chinchiro_rooms = {}
 
 @bot.tree.command(name="chinchiro_join", description="チンチロに参加")
 async def chinchiro_join(interaction: discord.Interaction, bet: int):
     if not await check_channel(interaction, "GAMBLE"): return
-    p = get_user_profile(interaction.user.id)
-    if p["coins"] < bet: return await interaction.response.send_message("❌ コイン不足", ephemeral=True)
+    cid = interaction.channel.id
+    if cid not in chinchiro_rooms: chinchiro_rooms[cid] = []
     
+    # 既に参加しているか確認
+    if any(p['user'].id == interaction.user.id for p in chinchiro_rooms[cid]):
+        return await interaction.response.send_message("❌ 既に参加しています", ephemeral=True)
+        
+    p = get_user_profile(interaction.user.id)
+    if p["coins"] < bet: return await interaction.response.send_message("❌ コインが足りません", ephemeral=True)
+    
+    chinchiro_rooms[cid].append({"user": interaction.user, "bet": bet})
+    await interaction.response.send_message(f"🎲 {interaction.user.name} が {bet} コインでチンチロに参加しました！")
+
 @bot.tree.command(name="chinchiro_start", description="対人戦チンチロ開始")
 async def chinchiro_start(interaction: discord.Interaction):
     if not await check_channel(interaction, "GAMBLE"): return
@@ -180,31 +202,25 @@ async def chinchiro_start(interaction: discord.Interaction):
         await interaction.followup.send(f"👤 {player['user'].name} の番です！")
         dices = await roll_dice()
         
-        # 役の判定ロジック
         if sorted(dices) == [1, 2, 3]:
             score = 0
             role = "ヒフミ (最弱!)"
         elif len(set(dices)) == 1:
-            score = dices[0] * 100 # アラシは最強
+            score = dices[0] * 100
             role = "アラシ!"
         elif len(set(dices)) == 3:
-            score = -1 # 目なし（最弱）
+            score = -1
             role = "目なし..."
         else:
-            # 2つ同じ目がある場合、残りの目がスコア
-            score = sum(dices) - (sum(dices) - (sum(dices) - sum(set(dices)))) # 簡易合計
-            # 実際には重複してない数字を出す処理が必要ですが、シンプルに合計値で勝負にします
             score = sum(dices) 
             role = f"{score}の目"
 
         await interaction.followup.send(f"🎲 {player['user'].name} は {role}！")
         res[player['user'].id] = {"score": score, "bet": player['bet'], "name": player['user'].name}
 
-    # 勝敗判定
     winner_id = max(res, key=lambda x: res[x]["score"])
     loser_id = min(res, key=lambda x: res[x]["score"])
     
-    # 引き分け対応
     if res[winner_id]["score"] == res[loser_id]["score"]:
         await interaction.followup.send("🤝 引き分けです！賭け金は戻ります。")
     else:
@@ -213,7 +229,10 @@ async def chinchiro_start(interaction: discord.Interaction):
         loser_p = get_user_profile(loser_id)
         winner_p["coins"] += pot
         loser_p["coins"] -= pot
-        save_data()
+        
+        save_supabase_data(winner_id, winner_p)  # 勝者のデータを保存
+        save_supabase_data(loser_id, loser_p)    # 敗者のデータを保存
+        
         await interaction.followup.send(f"🏆 勝者: {res[winner_id]['name']}！ {pot}コイン獲得！\n💰 残金: {winner_p['coins']}コイン")
     
     chinchiro_rooms[cid] = []
@@ -225,8 +244,11 @@ async def race_bet(interaction: discord.Interaction, horse_num: int, bet: int):
     if cid not in race_bets: race_bets[cid] = {}
     p = get_user_profile(interaction.user.id)
     if p["coins"] < bet: return await interaction.response.send_message("❌ 不足", ephemeral=True)
-    p["coins"] -= bet; race_bets[cid][interaction.user.id] = {"horse": horse_num, "bet": bet}
-    save_data()
+    
+    p["coins"] -= bet
+    race_bets[cid][interaction.user.id] = {"horse": horse_num, "bet": bet}
+    
+    save_supabase_data(interaction.user.id, p)  # 掛け金を引いた状態で保存
     await update_nickname(interaction.user, p["coins"])
     await interaction.response.send_message(f"🏁 {horses[horse_num]} に賭けました", ephemeral=True)
 
@@ -254,7 +276,6 @@ async def race_start(interaction: discord.Interaction):
     winner = max(progress, key=progress.get)
     await interaction.followup.send(f"👑 優勝は {horses[winner]}！")
     
-    # 結果発表と所持金の表示
     for u_id, b in race_bets[cid].items():
         p = get_user_profile(u_id)
         if b["horse"] == winner: 
@@ -262,19 +283,20 @@ async def race_start(interaction: discord.Interaction):
             p["coins"] += payout
             status_text = f"🎉 的中！ {payout}コイン獲得！"
         else:
-            status_text = "残念...不的中です。"
+            status_text = "残念...不定期です。"
+        
+        save_supabase_data(u_id, p)  # レース結果をSupabaseに保存
         
         m = interaction.guild.get_member(u_id)
         if m: 
             await update_nickname(m, p["coins"])
-            # 個別に結果と残金を通知
             await interaction.followup.send(f"👤 <@{u_id}>: {status_text}\n💰 現在の所持金: {p['coins']}コイン")
             
-    race_bets[cid] = {}; save_data()
+    race_bets[cid] = {}
+
 @bot.tree.command(name="odds", description="現在のオッズを確認")
 async def odds(interaction: discord.Interaction):
     if not await check_channel(interaction, "GAMBLE"): return
-    
     cid = interaction.channel.id
     if cid not in race_bets or not race_bets[cid]:
         return await interaction.response.send_message("❌ まだ誰も賭けていません。", ephemeral=True)
@@ -284,8 +306,8 @@ async def odds(interaction: discord.Interaction):
     for b in race_bets[cid].values(): horse_bets[b['horse']] += b['bet']
     
     odds_text = "\n".join([f"{horses[h]}: {max(1.1, round(total_pool/pool, 1)) if pool>0 else '---'}倍" for h, pool in horse_bets.items()])
-    
     await interaction.response.send_message(f"📊 **現在のオッズ**\n{odds_text}")
+
 @bot.tree.command(name="trade", description="他人にアイテムを売る/あげる")
 @app_commands.describe(member="相手", item_type="アイテム", price="価格(0で無料)")
 @app_commands.choices(item_type=[
@@ -298,15 +320,12 @@ async def trade(interaction: discord.Interaction, member: discord.Member, item_t
     sender = get_user_profile(interaction.user.id)
     receiver = get_user_profile(member.id)
     
-    # 所持チェック
     if sender[item_type] <= 0:
         return await interaction.response.send_message("❌ そのアイテムを持っていません。", ephemeral=True)
     
-    # 相手のコインチェック（価格設定がある場合）
     if price > 0 and receiver["coins"] < price:
         return await interaction.response.send_message(f"❌ 相手の所持金が足りません。", ephemeral=True)
     
-    # 取引実行
     sender[item_type] -= 1
     receiver[item_type] += 1
     
@@ -318,7 +337,8 @@ async def trade(interaction: discord.Interaction, member: discord.Member, item_t
     else:
         result_msg = f"{member.mention} にアイテムを譲渡しました！"
         
-    save_data()
+    save_supabase_data(interaction.user.id, sender)  # 送り側のデータを保存
+    save_supabase_data(member.id, receiver)          # 受け取り側のデータを保存
     await update_nickname(interaction.user, sender["coins"])
     
     await interaction.response.send_message(result_msg, ephemeral=True)
@@ -326,18 +346,16 @@ async def trade(interaction: discord.Interaction, member: discord.Member, item_t
 @bot.tree.command(name="compensation", description="【管理者用】ユーザーにコインを補填する")
 @app_commands.describe(member="補填する相手", coins="付与するコイン数")
 async def compensation(interaction: discord.Interaction, member: discord.Member, coins: int):
-    # 補填専用チャンネルでのみ実行可能にする設定（チャンネル名を環境に合わせて変更してください）
     if interaction.channel.name != "運営さんの部屋":
         return await interaction.response.send_message("❌ このチャンネルでは補填コマンドは使用できません。", ephemeral=True)
         
-    # 管理者権限（または特定の条件）を持っているかチェック
     if not interaction.user.guild_permissions.administrator:
         return await interaction.response.send_message("❌ あなたにはこのコマンドを実行する権限がありません。", ephemeral=True)
 
     p = get_user_profile(member.id)
     p["coins"] += coins
     
-    save_data()
+    save_supabase_data(member.id, p)  # 補填データを保存
     await update_nickname(member, p["coins"])
     
     await interaction.response.send_message(
