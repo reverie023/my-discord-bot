@@ -68,6 +68,19 @@ async def on_ready():
     await bot.tree.sync()
     load_data()
     income_timer.start()
+    @bot.event
+async def on_ready():
+    await bot.tree.sync()
+    load_data()
+    income_timer.start()
+    
+    # 【追加】起動時に通話中の全員を検知して開始時間を記録する
+    for guild in bot.guilds:
+        for vc in guild.voice_channels:
+            for member in vc.members:
+                if not member.bot:
+                    call_start_times[member.id] = time.time()
+    
     print(f"✅ 起動完了！")
 
 # --- 🎮 コマンド ---
