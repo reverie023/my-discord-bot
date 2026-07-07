@@ -148,6 +148,7 @@ async def steal(interaction: discord.Interaction, target: discord.Member):
     await update_nickname(target, t["coins"])
     await interaction.response.send_message(f"🦹 {stolen}コイン奪った", ephemeral=True)
 
+chinchiro_rooms = {}
 @bot.tree.command(name="chinchiro_start", description="対人戦チンチロ開始")
 async def chinchiro_start(interaction: discord.Interaction):
     if not await check_channel(interaction, "GAMBLE"): return
@@ -314,5 +315,28 @@ async def trade(interaction: discord.Interaction, member: discord.Member, item_t
     await update_nickname(interaction.user, sender["coins"])
     
     await interaction.response.send_message(result_msg, ephemeral=True)
+
+@bot.tree.command(name="compensation", description="【管理者用】ユーザーにコインを補填する")
+@app_commands.describe(member="補填する相手", coins="付与するコイン数")
+async def compensation(interaction: discord.Interaction, member: discord.Member, coins: int):
+    # 補填専用チャンネルでのみ実行可能にする設定（チャンネル名を環境に合わせて変更してください）
+    if interaction.channel.name != "運営さんの部屋":
+        return await interaction.response.send_message("❌ このチャンネルでは補填コマンドは使用できません。", ephemeral=True)
+        
+    # 管理者権限（または特定の条件）を持っているかチェック
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("❌ あなたにはこのコマンドを実行する権限がありません。", ephemeral=True)
+
+    p = get_user_profile(member.id)
+    p["coins"] += coins
+    
+    save_data()
+    await update_nickname(member, p["coins"])
+    
+    await interaction.response.send_message(
+        f"📢 【補填完了】\n"
+        f"{member.mention} に {coins} コインを補填しました。\n"
+        f"💰 相手の現在の所持金: {p['coins']} コイン"
+    )
 
 bot.run(os.getenv("DISCORD_TOKEN"))
