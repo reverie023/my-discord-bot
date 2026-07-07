@@ -1,368 +1,384 @@
-# --- コードの一番上 ---
-from flask import Flask
-from threading import Thread
-
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Bot is alive!"
-
-def run():
-    app.run(host='0.0.0.0', port=8080)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
-
-import os
-import datetime
-import io
-import json
 import discord
 from discord.ext import commands, tasks
-from dotenv import load_dotenv
-import matplotlib.pyplot as plt
-import matplotlib
+import random
+import asyncio
+import json
+import os
+import time
 
-# 日本語フォント設定
-matplotlib.rcParams["font.family"] = "sans-serif"
-matplotlib.rcParams["font.sans-serif"] = [
-    "Noto Sans CJK JP",
-    "Noto Sans JP",
-    "IPAexGothic",
-    "DejaVu Sans",
-]
+# ボットの初期設定
+intents = discord.Intents.default()
+intents.members = True
+intents.voice_states = True
+intents.message_content = True
 
-load_dotenv()
+bot = commands.Bot(command_prefix="/", intents=intents)
 
-intents = discord.Intents.all()
-bot = commands.Bot(command_prefix="!", intents=intents)
+# 【チャンネル名の設定】Discordのチャンネル名と一致させてください
+CHANNEL_GACHA = "ガチャ"
+CHANNEL_GAMBLE = "賭け場"
+CHANNEL_STATUS = "ステータス"
+CHANNEL_CALL_LOG = "通話履歴"
 
-# 環境変数から設定を読み込み
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
-RANK_CHANNEL_ID = int(os.getenv("RANK_CHANNEL_ID"))
-TOKEN = os.getenv("DISCORD_TOKEN")
+# --- 💾 データセーブ・ロードシステム ---
+DATA_FILE = "data.json"
+user_data = {}
 
-# タイムゾーンを日本時間に固定
-JST = datetime.timezone(datetime.timedelta(hours=9))
-
-# 💾 データの永続化設定
-DATA_FILE = "vc_data.json"
-
-total_times = {}
-monthly_times = {}
-join_times = {}  # 再起動でも消えないようにここに用意
+# ⏱️ 通話時間を記録する一時メモリ
+call_start_times = {}
 
 def load_data():
-    """ファイルからデータを読み込む"""
-    global total_times, monthly_times, join_times
+    global user_data
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
-                saved_data = json.load(f)
-                
-                # トータル時間の復元
-                total_times = {int(k): v for k, v in saved_data.get("total", {}).items()}
-                
-                # 月別時間の復元
-                raw_monthly = saved_data.get("monthly", {})
-                monthly_times = {}
-                for y_str, months in raw_monthly.items():
-                    monthly_times[int(y_str)] = {}
-                    for m_str, users in months.items():
-                        monthly_times[int(y_str)][int(m_str)] = {
-                            int(uid): sec for uid, sec in users.items()
-                        }
-                
-                # 入室時間の復元（文字列からdatetimeオブジェクトに変換）
-                raw_join = saved_data.get("join_times", {})
-                join_times = {}
-                for uid_str, time_str in raw_join.items():
-                    try:
-                        join_times[int(uid_str)] = datetime.datetime.fromisoformat(time_str)
-                    except:
-                        pass
-                        
-                print("データをファイルから読み込みました。")
-                return
+                user_data = json.load(f)
+                print("💾 ユーザーデータをファイルから読み込みました。")
         except Exception as e:
-            print(f"データ読み込みエラー: {e}")
-
-    total_times = {}
-    monthly_times = {}
-    join_times = {}
+            print(f"⚠️ データ読み込みエラー: {e}")
+            user_data = {}
 
 def save_data():
-    """データをファイルに保存する"""
-    global total_times, monthly_times, join_times
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
-            # datetimeオブジェクトを文字列に変換して保存できるようにする
-            serializable_join = {str(k): v.isoformat() for k, v in join_times.items()}
-            
-            json.dump({
-                "total": total_times, 
-                "monthly": monthly_times,
-                "join_times": serializable_join
-            }, f, ensure_ascii=False, indent=4)
+            json.dump(user_data, f, ensure_ascii=False, indent=4)
     except Exception as e:
-        print(f"データ保存エラー: {e}")
+        print(f"⚠️ データ保存エラー: {e}")
 
-# 最初にデータを読み込む
-load_data()
+def get_user_profile(user_id):
+    uid_str = str(user_id)
+    if uid_str not in user_data:
+        user_data[uid_str] = {"coins": 0, "tickets": 0, "shields": 0}
+        save_data()
+    return user_data[uid_str]
 
+# 【チャンネル制限チェック】
+async def check_channel(ctx, target_channel_name):
+    if ctx.channel.name == target_channel_name:
+        return True
+    msg = await ctx.send(f"❌ このコマンドは **#{target_channel_name}** チャンネル専用です！")
+    await asyncio.sleep(3)
+    try:
+        await ctx.message.delete()
+        await msg.delete()
+    except:
+        pass
+    return False
 
-# ============================================
-# Bot起動
-# ============================================
+# ログ送信ヘルパー
+async def send_call_log(guild, text):
+    channel = discord.utils.get(guild.text_channels, name=CHANNEL_CALL_LOG)
+    if channel:
+        await channel.send(text)
+
 @bot.event
 async def on_ready():
-    print(f"ログインしました: {bot.user}")
-    channel = bot.get_channel(CHANNEL_ID)
-    if channel:
-        pass
+    print(f"Logged in as {bot.user.name}")
+    load_data()
+    reset_race()
+    
+    # 💡 ボット起動時にすでに通話にいる人を救済（起動した瞬間からカウント）
+    now = time.time()
+    for guild in bot.guilds:
+        for voice_channel in guild.voice_channels:
+            for member in voice_channel.members:
+                if not member.bot:
+                    call_start_times[member.id] = now
+                    # 起動時入室の最低保証10コイン
+                    profile = get_user_profile(member.id)
+                    profile["coins"] += 10
+    save_data()
+    
+    income_timer.start()
 
-    if not auto_monthly_report.is_running():
-        auto_monthly_report.start()
+# --- 🪙 通話報酬システム (1分ごとに裏で10コイン追加、通知はなし) ---
+@tasks.loop(minutes=1.0)
+async def income_timer():
+    updated = False
+    for guild in bot.guilds:
+        for voice_channel in guild.voice_channels:
+            for member in voice_channel.members:
+                if member.bot:
+                    continue
+                profile = get_user_profile(member.id)
+                profile["coins"] += 10
+                updated = True
+    if updated:
+        save_data()
 
-    try:
-        synced = await bot.tree.sync()
-        print(f"スラッシュコマンド同期完了: {len(synced)}個")
-    except Exception as e:
-        print(e)
-
-
-# ============================================
-# VC参加・退出イベント
-# ============================================
+# --- 🎤 ボイスチャンネル監視（通話終了時のみログを出す） ---
 @bot.event
 async def on_voice_state_update(member, before, after):
-    channel = bot.get_channel(CHANNEL_ID)
-    if not channel:
+    if member.bot:
         return
 
-    # 参加
+    # パターン1: 通話に参加したとき（裏で時間記録と最低保証のみ）
     if before.channel is None and after.channel is not None:
-        join_times[member.id] = datetime.datetime.now(JST)
-        save_data()  # 参加時間を即座にファイルへ保存
+        profile = get_user_profile(member.id)
+        profile["coins"] += 10
+        save_data()
+        call_start_times[member.id] = time.time()
 
-        embed = discord.Embed(
-            description=f"🟢 **{member.display_name}** が **{after.channel.name}** に参加しました",
-            color=discord.Color.green(),
-        )
-        await channel.send(embed=embed)
-
-    # 退出
+    # パターン2: 通話を完全に終了（退出）したとき 💡ここで初めてログを出す
     elif before.channel is not None and after.channel is None:
-        start = join_times.get(member.id)
-
-        if start:
-            # もしタイムゾーンがついていなければ日本時間を付与
-            if start.tzinfo is None:
-                start = start.replace(tzinfo=JST)
-                
-            end = datetime.datetime.now(JST)
-            duration = end - start
-            seconds = int(duration.total_seconds())
-
-            # 累計時間
-            total_times[member.id] = total_times.get(member.id, 0) + seconds
-
-            # 月別時間
-            year = end.year
-            month = end.month
-
-            if year not in monthly_times:
-                monthly_times[year] = {}
-            if month not in monthly_times[year]:
-                monthly_times[year][month] = {}
-
-            monthly_times[year][month][member.id] = (
-                monthly_times[year][month].get(member.id, 0) + seconds
+        start_time = call_start_times.pop(member.id, None)
+        
+        if start_time is not None:
+            duration_seconds = time.time() - start_time
+            duration_minutes = int(duration_seconds // 60)
+            earned_coins = (duration_minutes * 10) + 10
+            
+            await send_call_log(
+                member.guild, 
+                f"📴 【通話終了】 **{member.display_name}** が「{before.channel.name}」から退出しました。\n"
+                f"⏱️ 通話時間: 約 **{duration_minutes}分** / 🪙 合計獲得: **+{earned_coins}コイン**"
             )
 
-            # ユーザーの入室記録を消去して保存
-            join_times.pop(member.id, None)
-            save_data()
+# --- 💳 コマンド: お財布確認 (ステータス専用) ---
+@bot.command(name="wallet")
+async def wallet(ctx):
+    if not await check_channel(ctx, CHANNEL_STATUS): return
+    profile = get_user_profile(ctx.author.id)
+    embed = discord.Embed(title="💰 あなたの財布・インベントリ", color=0xffd700)
+    embed.add_field(name="🪙 所持コイン", value=f"**{profile['coins']}** コイン", inline=False)
+    embed.add_field(name="🎫 泥棒チケット", value=f"**{profile['tickets']}** 枚", inline=True)
+    embed.add_field(name="🛡️ お守りカード", value=f"**{profile['shields']}** 枚", inline=True)
+    await ctx.send(embed=embed)
 
-            minutes = seconds // 60
-            sec = seconds % 60
+# --- 🎰 コマンド: ガチャ (ガチャ専用) ---
+@bot.command(name="gacha")
+async def gacha(ctx):
+    if not await check_channel(ctx, CHANNEL_GACHA): return
+    profile = get_user_profile(ctx.author.id)
+    gacha_cost = 100
+    
+    if profile["coins"] < gacha_cost:
+        await ctx.send(f"❌ コインが足りません！（ガチャ1回: {gacha_cost}コイン）")
+        return
+    
+    profile["coins"] -= gacha_cost
+    roll = random.randint(1, 100)
+    
+    if roll <= 40:
+        sub_roll = random.randint(1, 100)
+        tickets_won = 1 if sub_roll <= 55 else (2 if sub_roll <= 80 else 3)
+        profile["tickets"] += tickets_won
+        result_text = f"🎫 **泥棒チケット が {tickets_won}枚** 当たった！\n`/steal [相手]` コマンドで使えます！"
+        color = 0x3498db
+    elif roll <= 90:
+        coins_won = random.randint(30, 120)
+        profile["coins"] += coins_won
+        result_text = f"🪙 **小銭ゲット！**\nお財布に **{coins_won}コイン** がプラスされました！"
+        color = 0x2ecc71
+    else:
+        profile["shields"] += 1
+        result_text = f"🛡️ **お守りカード（レア）** が当たった！\n泥棒を1回自動でガードします！"
+        color = 0xe74c3c
 
-            if minutes >= 60:
-                color = discord.Color.red()
-            elif minutes >= 30:
-                color = discord.Color.orange()
-            else:
-                color = discord.Color.blue()
+    save_data()
+    embed = discord.Embed(title="🎰 ガチャ結果", description=result_text, color=color)
+    await ctx.send(embed=embed)
 
-            embed = discord.Embed(
-                title="通話終了",
-                description=f"🔴 **{member.display_name}** が **{before.channel.name}** から退出しました",
-                color=color,
-            )
-            embed.add_field(name="今回の通話時間", value=f"**{minutes}分 {sec}秒**", inline=False)
+# --- 🦹 コマンド: 泥棒 (ガチャ専用) ---
+@bot.command(name="steal")
+async def steal(ctx, target: discord.Member):
+    if not await check_channel(ctx, CHANNEL_GACHA): return
+    thief = ctx.author
+    thief_profile = get_user_profile(thief.id)
+    target_profile = get_user_profile(target.id)
+    
+    if thief.id == target.id or target.bot:
+        await ctx.send("❌ 対象が不正です。")
+        return
+    if thief_profile["tickets"] < 1:
+        await ctx.send("❌ 泥棒チケットを持っていません！")
+        return
+    
+    thief_profile["tickets"] -= 1
+    try: await ctx.message.delete()
+    except: pass
 
-            total_min = total_times[member.id] // 60
-            total_sec = total_times[member.id] % 60
-            embed.add_field(name="累計通話時間", value=f"**{total_min}分 {total_sec}秒**", inline=False)
-
-            await channel.send(embed=embed)
-
-        else:
-            # 万が一データが消えていた場合のセーフティ
-            embed = discord.Embed(
-                description=f"🔴 **{member.display_name}** が **{before.channel.name}** から退出しました (長時間の通話のため、時間が計測できませんでした)",
-                color=discord.Color.red(),
-            )
-            await channel.send(embed=embed)
-
-    # 移動
-    elif before.channel is not None and after.channel is not None and before.channel.id != after.channel.id:
-        embed = discord.Embed(
-            description=f"🟡 **{member.display_name}** が **{before.channel.name}** → **{after.channel.name}** に移動しました",
-            color=discord.Color.yellow(),
-        )
-        await channel.send(embed=embed)
-
-
-# ============================================
-# ランキング投稿関数
-# ============================================
-async def post_monthly_rank(channel, year, month, is_progress=False):
-    if year not in monthly_times or month not in monthly_times[year]:
-        await channel.send(f"{year}年{month}月の通話記録はありません。")
+    if target_profile["shields"] > 0:
+        target_profile["shields"] -= 1
+        save_data()
+        try: await thief.send(f"💀 **泥棒失敗…**\n{target.display_name} はお守りを持っていました！")
+        except: pass
+        try: await target.send(f"🛡️ **ガード成功！**\n誰かの泥棒をお守りカードで防ぎました！")
+        except: pass
         return
 
-    data = monthly_times[year][month]
-    ranking = sorted(data.items(), key=lambda x: x[1], reverse=True)
+    steal_roll = random.randint(1, 100)
+    if steal_roll <= 10: stolen_coins, r_type = 300, "🔥 **大成功！！**"
+    elif steal_roll <= 40: stolen_coins, r_type = 200, "✨ **中成功！**"
+    elif steal_roll <= 90: stolen_coins, r_type = 100, "👍 **小成功**"
+    else: stolen_coins, r_type = 0, "💀 **失敗…**"
 
-    title = (
-        f"📅 {year}年{month}月 通話時間ランキング（途中経過）"
-        if is_progress
-        else f"🎖 {year}年{month}月 通話時間ランキング（確定）"
+    if target_profile["coins"] < stolen_coins:
+        stolen_coins = target_profile["coins"]
+
+    target_profile["coins"] -= stolen_coins
+    thief_profile["coins"] += stolen_coins
+    save_data()
+
+    try: await thief.send(f"{r_type}\n{target.display_name} から **{stolen_coins}コイン** 奪いました！" if stolen_coins > 0 else f"{r_type}\n何も盗めませんでした…")
+    except: pass
+    if stolen_coins > 0:
+        try: await target.send(f"🚨 **警告：泥棒被害！**\n誰かに **{stolen_coins}コイン** 盗まれました！")
+        except: pass
+
+# --- 🎲 ゲーム1: ちんちろ (賭け場専用) ---
+def get_chinchiro_eye():
+    dice = [random.randint(1, 6) for _ in range(3)]
+    dice.sort()
+    if dice == [1, 1, 1]: return (5, "ピンゾロ (5倍返し)")
+    if dice[0] == dice[1] == dice[2]: return (3, f"{dice[0]}のゾロ目 (3倍返し)")
+    if dice == [4, 5, 6]: return (3, "シゴロ (3倍返し)")
+    if dice == [1, 2, 3]: return (0, "ヒフミ (即負け)")
+    if dice[0] == dice[1]: return (1, f"目:{dice[2]}")
+    if dice[1] == dice[2]: return (1, f"目:{dice[0]}")
+    return (0, "目なし")
+
+@bot.command(name="chinchiro")
+async def chinchiro(ctx, bet: int):
+    if not await check_channel(ctx, CHANNEL_GAMBLE): return
+    profile = get_user_profile(ctx.author.id)
+    if bet < 10 or bet > 500:
+        await ctx.send("❌ 賭け金は 10 〜 500 コインの間で指定してください。")
+        return
+    if profile["coins"] < bet:
+        await ctx.send("❌ 所持コインが足りません。")
+        return
+
+    profile["coins"] -= bet
+    save_data()
+    
+    p_mult, p_name = get_chinchiro_eye()
+    await ctx.send(f"🎲 {ctx.author.mention} の出目: **{p_name}**")
+    await asyncio.sleep(1)
+    
+    b_mult, b_name = get_chinchiro_eye()
+    await ctx.send(f"🤖 ボット（親）の出目: **{b_name}**")
+    await asyncio.sleep(1)
+    
+    if p_name == "ヒフミ (即負け)":
+        await ctx.send(f"😭 {ctx.author.mention} の負け！ **{bet}コイン** 没収。")
+    elif b_name == "ヒフミ (即負け)" and p_name != "目なし":
+        p_mult = max(p_mult, 1)
+        reward = bet * (p_mult + 1)
+        profile["coins"] += reward
+        await ctx.send(f"🎉 ボットが自滅！{ctx.author.mention} の勝ち！ **+{reward - bet}コイン**")
+    elif p_mult > b_mult or (p_mult == b_mult and p_mult > 0 and p_name > b_name):
+        reward = bet * (p_mult + 1)
+        profile["coins"] += reward
+        await ctx.send(f"🎉 {ctx.author.mention} の勝ち！ **+{reward - bet}コイン**")
+    elif p_mult == b_mult and p_name == b_name and p_name != "目なし":
+        profile["coins"] += bet
+        await ctx.send("🤝 引き分け！コインが戻ってきました。")
+    else:
+        await ctx.send(f"😭 {ctx.author.mention} の負け！ **{bet}コイン** 没収。")
+    
+    save_data()
+
+# --- 🐴 ゲーム2: カジノ競馬 (賭け場専用) ---
+horses = {1: "🐴ドロボウキング", 2: "🐴オマモリマル", 3: "🐴チンチロマスター", 4: "🐴コゼニデント"}
+horse_odds = {1: 4.0, 2: 4.0, 3: 4.0, 4: 4.0}
+race_bets = {}
+race_active = False
+
+def reset_race():
+    global horse_odds, race_bets
+    race_bets.clear()
+    for i in range(1, 5):
+        horse_odds[i] = round(random.uniform(1.5, 9.5), 1)
+
+@bot.command(name="race_bet")
+async def race_bet(ctx, horse_num: int, bet: int):
+    if not await check_channel(ctx, CHANNEL_GAMBLE): return
+    global race_active
+    if race_active:
+        await ctx.send("❌ すでにレースが発走しています！")
+        return
+    if horse_num not in horses:
+        await ctx.send("❌ 1〜4番のウマを選んでください。")
+        return
+    if bet < 10 or bet > 500:
+        await ctx.send("❌ 賭け金は 10 〜 500 コインの間です。")
+        return
+    
+    profile = get_user_profile(ctx.author.id)
+    if profile["coins"] < bet:
+        await ctx.send("❌ コインが足りません。")
+        return
+        
+    profile["coins"] -= bet
+    save_data()
+    
+    race_bets[ctx.author.id] = {
+        "horse": horse_num, 
+        "bet": bet, 
+        "odds": horse_odds[horse_num],
+        "name": ctx.author.display_name
+    }
+    
+    odds_info = "\n".join([f"{horses[i]} : **{horse_odds[i]}倍**" for i in range(1, 5)])
+    await ctx.send(
+        f"🏁 {ctx.author.mention} が **{horses[horse_num]}** ({horse_odds[horse_num]}倍) に **{bet}コイン** 賭けました！\n\n"
+        f"【現在の出走馬・オッズ】\n{odds_info}\n\n"
+        f"`/race_start` でスタート！"
     )
 
-    embed = discord.Embed(title=title, color=discord.Color.gold())
-    medals = ["🥇", "🥈", "🥉"]
-
-    for i, (user_id, sec) in enumerate(ranking, start=1):
-        member = channel.guild.get_member(user_id)
-        if member:
-            hours = sec // 3600
-            minutes = (sec % 3600) // 60
-            seconds = sec % 60
-
-            time_text = (
-                f"{hours}時間 {minutes}分 {seconds}秒" if hours > 0 else f"{minutes}分 {seconds}秒"
-            )
-            icon = medals[i - 1] if i <= 3 else f"{i}位 🔹"
-
-            embed.add_field(name=f"{icon} {member.display_name}", value=f"**{time_text}**", inline=False)
-
-    await channel.send(embed=embed)
-
-
-# ============================================
-# 自動投稿タスク
-# ============================================
-@tasks.loop(minutes=1)
-async def auto_monthly_report():
-    now = datetime.datetime.now(JST)
-    rank_channel = bot.get_channel(RANK_CHANNEL_ID)
-    if not rank_channel:
+@bot.command(name="race_start")
+async def race_start(ctx):
+    if not await check_channel(ctx, CHANNEL_GAMBLE): return
+    global race_active, race_bets
+    if race_active: return
+    if not race_bets:
+        await ctx.send("❌ 誰もウマに賭けていません！")
         return
-
-    if now.day == 1 and now.hour == 0 and now.minute == 0:
-        year = now.year
-        month = now.month - 1
-        if month == 0:
-            year -= 1
-            month = 12
-        await post_monthly_rank(rank_channel, year, month)
-
-    if now.day in [10, 20, 30] and now.hour == 0 and now.minute == 0:
-        await post_monthly_rank(rank_channel, now.year, now.month, is_progress=True)
-
-
-@auto_monthly_report.before_loop
-async def before_auto_monthly_report():
-    await bot.wait_until_ready()
-
-
-# ============================================
-# スラッシュコマンド
-# ============================================
-@bot.tree.command(name="vcrank_month", description="指定した月の通話時間ランキングを表示します")
-async def vcrank_month_slash(interaction: discord.Interaction, year: int = None, month: int = None):
-    now = datetime.datetime.now(JST)
-    if year is None:
-        year = now.year
-    if month is None:
-        month = now.month
-
-    rank_channel = interaction.guild.get_channel(RANK_CHANNEL_ID)
-    if rank_channel:
-        await post_monthly_rank(rank_channel, year, month)
-        await interaction.response.send_message("ランキングを投稿しました！", ephemeral=True)
+        
+    race_active = True
+    progress = {1: 0, 2: 0, 3: 0, 4: 0}
+    goal = 15
+    
+    msg = await ctx.send("🟢 各馬一斉にスタートしました！！\n" + "\n".join([f"{horses[i]}: 「」" for i in range(1, 5)]))
+    await asyncio.sleep(1.5)
+    
+    while max(progress.values()) < goal:
+        for i in range(1, 5):
+            speed_bonus = 1 if horse_odds[i] < 3.5 else 0
+            progress[i] += random.randint(1, 3) + speed_bonus
+        
+        lines = []
+        for i in range(1, 5):
+            lane = "・" * progress[i] + "🏇" + "・" * max(0, (goal - progress[i]))
+            if progress[i] >= goal: lane = " " * goal + "✨👑✨"
+            lines.append(f"{horses[i]}: 「{lane}」")
+            
+        await msg.edit(content="🏁 **レース実況中！！** 🏁\n" + "\n".join(lines))
+        await asyncio.sleep(1.2)
+        
+    winner = max(progress, key=progress.get)
+    await ctx.send(f"👑 1着は **{horses[winner]}** です！！！")
+    
+    payout_messages = []
+    for u_id, b_info in race_bets.items():
+        if b_info["horse"] == winner:
+            reward = int(b_info["bet"] * b_info["odds"])
+            get_user_profile(u_id)["coins"] += reward
+            payout_messages.append(f"🎉 {b_info['name']} が的中！ (倍率: {b_info['odds']}倍) **+{reward}コイン**")
+            
+    if payout_messages:
+        await ctx.send("\n".join(payout_messages))
     else:
-        await interaction.response.send_message("チャンネルが見つかりません。", ephemeral=True)
+        await ctx.send("💸 的中者は誰もいませんでした…")
+        
+    save_data()
+    reset_race()
+    race_active = False
 
-
-@bot.tree.command(name="vcrank_progress", description="今月の途中経過ランキングを表示します")
-async def vcrank_progress_slash(interaction: discord.Interaction):
-    now = datetime.datetime.now(JST)
-    rank_channel = interaction.guild.get_channel(RANK_CHANNEL_ID)
-    if rank_channel:
-        await post_monthly_rank(rank_channel, now.year, now.month, is_progress=True)
-        await interaction.response.send_message("途中経過を投稿しました！", ephemeral=True)
-    else:
-        await interaction.response.send_message("チャンネルが見つかりません。", ephemeral=True)
-
-
-@bot.tree.command(name="vcrank_graph", description="今月の通話時間ランキングをグラフで表示します")
-async def vcrank_graph_slash(interaction: discord.Interaction):
-    now = datetime.datetime.now(JST)
-    year = now.year
-    month = now.month
-
-    if year not in monthly_times or month not in monthly_times[year]:
-        await interaction.response.send_message("今月の通話記録はまだありません。")
-        return
-
-    await interaction.response.defer()
-
-    data = monthly_times[year][month]
-    ranking = sorted(data.items(), key=lambda x: x[1], reverse=True)
-
-    names = []
-    hours_list = []
-
-    for user_id, sec in ranking:
-        member = interaction.guild.get_member(user_id)
-        if member:
-            hours = sec / 3600
-            names.append(member.display_name)
-            hours_list.append(hours)
-
-    if not names:
-        await interaction.followup.send("グラフに表示できるメンバーがサーバー内に見つかりません。")
-        return
-
-    plt.figure(figsize=(10, 6))
-    plt.barh(names, hours_list, color="skyblue")
-    plt.xlabel("通話時間（時間）")
-    plt.title(f"{year}年{month}月 通話時間ランキング（グラフ）")
-    plt.gca().invert_yaxis()
-    plt.tight_layout()
-
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png")
-    buf.seek(0)
-    plt.close()
-
-    file = discord.File(buf, filename="vcrank_graph.png")
-    await interaction.followup.send(file=file)
-
-keep_alive()
-bot.run(TOKEN)
+# --- ⚙️ Render用環境変数読み込み部（修正済） ---
+TOKEN = os.getenv("DISCORD_TOKEN")
+if TOKEN:
+    bot.run(TOKEN)
+else:
+    print("❌ 環境変数 'DISCORD_TOKEN' が設定されていません！")
