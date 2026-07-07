@@ -101,16 +101,25 @@ async def wallet(interaction: discord.Interaction):
     p = get_user_profile(interaction.user.id)
     await interaction.response.send_message(f"💰 {p['coins']}コイン / 🎫 {p['tickets']}枚 / 🛡️ {p['shields']}個")
 
-@bot.tree.command(name="gacha", description="ガチャを引く")
+@bot.tree.command(name="gacha", description="ガチャ")
 async def gacha(interaction: discord.Interaction):
     if not await check_channel(interaction, CHANNELS["GACHA"]): return
     p = get_user_profile(interaction.user.id)
-    if p["coins"] < 100: return await interaction.response.send_message("❌ 不足")
-    p["coins"] -= 100; roll = random.randint(1, 100)
-    if roll <= 40: p["tickets"] += 1; res = "🎫 チケット"
-    elif roll <= 90: win = random.randint(30, 120); p["coins"] += win; res = f"🪙 {win}コイン"
-    else: p["shields"] += 1; res = "🛡️ お守り"
-    save_data(); await interaction.response.send_message(f"🎰 結果: {res}")
+    if p["coins"] < 100: 
+        # ここも自分だけに通知
+        return await interaction.response.send_message("❌ コインが足りません！", ephemeral=True)
+    
+    p["coins"] -= 100
+    if random.randint(1, 100) <= 90: 
+        p["coins"] += random.randint(30, 120); res = "コイン"
+    else: 
+        p["shields"] += 1; res = "お守り"
+        
+    save_data()
+    await update_nickname(interaction.user, p["coins"])
+    
+    # ★ここを修正: ephemeral=True を追加
+    await interaction.response.send_message(f"🎰 結果: {res} をゲットしました！", ephemeral=True)
 
 @bot.tree.command(name="steal", description="泥棒")
 async def steal(interaction: discord.Interaction, target: discord.Member):
