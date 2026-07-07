@@ -1,5 +1,5 @@
 import discord
-from discord.ext import import commands, tasks
+from discord.ext import commands, tasks
 from discord import app_commands  # ★この行を新しく追加しました！
 import random
 import asyncio
