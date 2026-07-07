@@ -78,11 +78,15 @@ async def on_ready():
     await bot.tree.sync()
     load_data()
     income_timer.start()
+    
+    # 起動時に通話中のメンバーを検知
     for guild in bot.guilds:
         for vc in guild.voice_channels:
             for member in vc.members:
-                if not member.bot:
+                # メンバーがNoneだったり、botだったりする場合を考慮して安全に記録
+                if member and not member.bot:
                     call_start_times[member.id] = time.time()
+    
     print(f"✅ 起動完了！")
 
 # --- 🎮 コマンド ---
