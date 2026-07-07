@@ -148,7 +148,14 @@ async def steal(interaction: discord.Interaction, target: discord.Member):
     await update_nickname(target, t["coins"])
     await interaction.response.send_message(f"🦹 {stolen}コイン奪った", ephemeral=True)
 
-chinchiro_rooms = {}
+chinchiro_rooms = {}  # ★この1行を追加してください！
+
+@bot.tree.command(name="chinchiro_join", description="チンチロに参加")
+async def chinchiro_join(interaction: discord.Interaction, bet: int):
+    if not await check_channel(interaction, "GAMBLE"): return
+    p = get_user_profile(interaction.user.id)
+    if p["coins"] < bet: return await interaction.response.send_message("❌ コイン不足", ephemeral=True)
+    
 @bot.tree.command(name="chinchiro_start", description="対人戦チンチロ開始")
 async def chinchiro_start(interaction: discord.Interaction):
     if not await check_channel(interaction, "GAMBLE"): return
