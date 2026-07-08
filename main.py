@@ -22,6 +22,7 @@ intents.message_content = True
 intents.voice_states = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# バックアップ用チャンネルを追加したチャンネルリスト
 CHANNELS = {"GACHA": "ガチャ", "GAMBLE": "賭け場", "STATUS": "ステータス", "LOG": "通話履歴", "BACKUP": "データ保存"}
 race_bets = {}
 call_start_times = {}
@@ -49,31 +50,31 @@ async def check_channel(interaction: discord.Interaction, target_key):
     return True
 
 def get_user_profile(user_id: int) -> dict:
-    """Supabaseからユーザーデータを取得。存在しない場合は新規作成"""
+    """Supabaseからユーザーデータを取得。存在しない場合は新規作成して保存"""
     try:
         response = supabase.table("user_profiles").select("*").eq("user_id", user_id).execute()
         if response.data:
             return response.data[0]
         
-        # データがない場合は新規登録（初期値: コイン1000枚）
+        # データがない場合は初期値を用意して速やかにupsert（新規登録）
         new_profile = {"user_id": user_id, "coins": 1000, "shields": 0, "tickets": 0}
-        supabase.table("user_profiles").insert(new_profile).execute()
+        supabase.table("user_profiles").upsert(new_profile).execute()
         return new_profile
     except Exception as e:
         print(f"データ取得エラー: {e}")
-        return {"user_id": user_id, "coins": 0, "shields": 0, "tickets": 0}
+        return {"user_id": user_id, "coins": 1000, "shields": 0, "tickets": 0}
 
 def save_supabase_data(user_id: int, data: dict):
-    """特定のユーザーのデータをSupabaseに即時保存する"""
+    """特定のユーザーのデータをSupabaseに即時保存する（存在しなければ新規作成、あれば更新）"""
     try:
-        # 保存用にデータを整形（user_idを固定）
         save_data = {
             "user_id": user_id,
-            "coins": data.get("coins", 1000),
-            "shields": data.get("shields", 0),
-            "tickets": data.get("tickets", 0)
+            "coins": int(data.get("coins", 1000)),
+            "shields": int(data.get("shields", 0)),
+            "tickets": int(data.get("tickets", 0))
         }
-        supabase.table("user_profiles").update(save_data).eq("user_id", user_id).execute()
+        # updateからupsertに変更し、空のデータベースでのエラーを完全に回避
+        supabase.table("user_profiles").upsert(save_data).execute()
     except Exception as e:
         print(f"データ保存エラー: {e}")
 
@@ -86,7 +87,7 @@ async def income_timer():
                 if not member.bot:
                     p = get_user_profile(member.id)
                     p["coins"] += 10
-                    save_supabase_data(member.id, p)  # Supabaseに保存
+                    save_supabase_data(member.id, p)
                     await update_nickname(member, p["coins"])
 
 @bot.event
@@ -94,13 +95,11 @@ async def on_ready():
     await bot.tree.sync()
     income_timer.start()
     
-    # 起動時に通話中のメンバーを検知
     for guild in bot.guilds:
         for vc in guild.voice_channels:
             for member in vc.members:
                 if member and not member.bot:
                     call_start_times[member.id] = time.time()
-    
     print(f"✅ 起動完了！")
 
 # --- 🎮 コマンド ---
@@ -128,7 +127,6 @@ async def gacha(interaction: discord.Interaction):
             win = random.randint(50, 400)
             res = f"🎉 {win}コイン"
         p["coins"] += win
-        
     elif roll <= 85:
         res = "💨 ハズレ"
     else:
@@ -140,7 +138,7 @@ async def gacha(interaction: discord.Interaction):
             p["tickets"] += 1
             res = "🎫 泥棒チケット"
         
-    save_supabase_data(interaction.user.id, p)  # Supabaseに保存
+    save_supabase_data(interaction.user.id, p)
     await update_nickname(interaction.user, p["coins"])
     await interaction.response.send_message(f"🎰 結果: {res} をゲット！\n💰 残金: {p['coins']}コイン", ephemeral=True)
         
@@ -153,9 +151,8 @@ async def steal(interaction: discord.Interaction, target: discord.Member):
     stolen = random.randint(50, 200)
     t["coins"] -= stolen; p["coins"] += stolen
     
-    save_supabase_data(interaction.user.id, p)  # 自分のデータを保存
-    save_supabase_data(target.id, t)            # 相手のデータを保存
-    
+    save_supabase_data(interaction.user.id, p)
+    save_supabase_data(target.id, t)
     await update_nickname(interaction.user, p["coins"])
     await update_nickname(target, t["coins"])
     await interaction.response.send_message(f"🦹 {stolen}コイン奪った", ephemeral=True)
@@ -168,7 +165,6 @@ async def chinchiro_join(interaction: discord.Interaction, bet: int):
     cid = interaction.channel.id
     if cid not in chinchiro_rooms: chinchiro_rooms[cid] = []
     
-    # 既に参加しているか確認
     if any(p['user'].id == interaction.user.id for p in chinchiro_rooms[cid]):
         return await interaction.response.send_message("❌ 既に参加しています", ephemeral=True)
         
@@ -230,67 +226,86 @@ async def chinchiro_start(interaction: discord.Interaction):
         winner_p["coins"] += pot
         loser_p["coins"] -= pot
         
-        save_supabase_data(winner_id, winner_p)  # 勝者のデータを保存
-        save_supabase_data(loser_id, loser_p)    # 敗者のデータを保存
-        
+        save_supabase_data(winner_id, winner_p)
+        save_supabase_data(loser_id, loser_p)
         await interaction.followup.send(f"🏆 勝者: {res[winner_id]['name']}！ {pot}コイン獲得！\n💰 残金: {winner_p['coins']}コイン")
     
     chinchiro_rooms[cid] = []
 
-@bot.tree.command(name="race_bet", description="競馬")
+# --- 🏇 競馬システム ---
+@bot.tree.command(name="race_bet", description="競馬にベットします")
+@app_commands.describe(horse_num="賭ける馬の番号 (1〜4)", bet="賭けるコインの数")
 async def race_bet(interaction: discord.Interaction, horse_num: int, bet: int):
     if not await check_channel(interaction, "GAMBLE"): return
+    if horse_num not in horses:
+        return await interaction.response.send_message("❌ 存在しない馬の番号です。1〜4の中から選んでください。", ephemeral=True)
+    if bet <= 0:
+        return await interaction.response.send_message("❌ 1コイン以上を賭けてください。", ephemeral=True)
+
     cid = interaction.channel.id
     if cid not in race_bets: race_bets[cid] = {}
+    
     p = get_user_profile(interaction.user.id)
-    if p["coins"] < bet: return await interaction.response.send_message("❌ 不足", ephemeral=True)
+    if p["coins"] < bet: 
+        return await interaction.response.send_message(f"❌ コインが足りません。現在の所持金: {p['coins']}コイン", ephemeral=True)
     
     p["coins"] -= bet
     race_bets[cid][interaction.user.id] = {"horse": horse_num, "bet": bet}
     
-    save_supabase_data(interaction.user.id, p)  # 掛け金を引いた状態で保存
+    save_supabase_data(interaction.user.id, p)
     await update_nickname(interaction.user, p["coins"])
-    await interaction.response.send_message(f"🏁 {horses[horse_num]} に賭けました", ephemeral=True)
+    await interaction.response.send_message(f"🏁 **{horses[horse_num]}** に {bet}コイン 賭けました！ (残金: {p['coins']})", ephemeral=True)
 
-@bot.tree.command(name="race_start", description="レース開始")
+@bot.tree.command(name="race_start", description="レースを開始します")
 async def race_start(interaction: discord.Interaction):
     if not await check_channel(interaction, "GAMBLE"): return
     cid = interaction.channel.id
-    if not race_bets.get(cid): return await interaction.response.send_message("❌ 誰も賭けていません", ephemeral=True)
+    if not race_bets.get(cid): 
+        return await interaction.response.send_message("❌ まだ誰も賭けていないため、レースを開始できません。", ephemeral=True)
     
-    total_pool = sum(b['bet'] for b in race_bets[cid].values())
-    horse_bets = {i: 0 for i in range(1, 7)}
-    for b in race_bets[cid].values(): horse_bets[b['horse']] += b['bet']
+    # --- 🎲 オッズ用のダミー賭け金（1〜4の乱数）を裏で生成 ---
+    # 毎回レースごとに、各馬に1〜4のランダムな額がベースとして賭けられている扱いにします
+    dummy_bets = {i: random.randint(1, 4) for i in horses.keys()}
     
-    odds_text = "\n".join([f"{horses[h]}: {max(1.1, round(total_pool/pool, 1)) if pool>0 else '---'}倍" for h, pool in horse_bets.items()])
+    # 総プール金の計算（プレイヤー全員の賭け金 ＋ 乱数のベース合計）
+    total_pool = sum(b['bet'] for b in race_bets[cid].values()) + sum(dummy_bets.values())
     
-    await interaction.response.send_message(f"🟢 レース開始！\n【オッズ】\n{odds_text}")
-    msg = await interaction.followup.send("🏁 実況: レースが始まりました！")
+    # 各馬の賭け金を集計
+    horse_bets = {i: dummy_bets[i] for i in horses.keys()} # 最初から乱数を入れておく
+    for b in race_bets[cid].values(): 
+        horse_bets[b['horse']] += b['bet']
     
-    progress = {i: 0 for i in range(1, 7)}
+    # オッズの計算（1〜4の乱数が最初から入っているため、絶対に分母が0にならず倍率が出ます）
+    odds_text = "\n".join([f"{horses[h]}: {max(1.1, round(total_pool/pool, 1))}倍" for h, pool in horse_bets.items()])
+    
+    await interaction.response.send_message(f"🟢 **ゲートオープン！ レースが開始されました！**\n【確定オッズ（NPC投票含む）】\n{odds_text}")
+    msg = await interaction.followup.send("🏁 実況: 各馬一斉にスタートしました！")
+    
+    progress = {i: 0 for i in horses.keys()}
     for _ in range(15):
         await asyncio.sleep(1.0)
         for h in progress: progress[h] += random.randint(0, 3)
-        await msg.edit(content=f"🏁 実況中...\n" + "\n".join([f"{horses[h]}: {'・'*progress[h]}🏇" for h in progress]))
+        await msg.edit(content=f"🏁 **実況: 各馬中盤の直線コース！**\n" + "\n".join([f"{horses[h]}: {'・'*progress[h]}🏇" for h in progress]))
     
     winner = max(progress, key=progress.get)
-    await interaction.followup.send(f"👑 優勝は {horses[winner]}！")
+    await interaction.followup.send(f"👑 **見事1着でゴールインしたのは {horses[winner]} ！！！**")
     
     for u_id, b in race_bets[cid].items():
         p = get_user_profile(u_id)
         if b["horse"] == winner: 
+            # 配当計算時も、乱数を含んだ比率で計算します
             payout = int(b["bet"] * max(1.1, (total_pool / horse_bets[winner])))
             p["coins"] += payout
-            status_text = f"🎉 的中！ {payout}コイン獲得！"
+            status_text = f"🎉 お見事！予想的中です！ **+{payout}** コイン獲得！"
         else:
-            status_text = "残念...不定期です。"
+            status_text = f"❌ 残念...ハズレました。"
         
-        save_supabase_data(u_id, p)  # レース結果をSupabaseに保存
+        save_supabase_data(u_id, p)
         
         m = interaction.guild.get_member(u_id)
         if m: 
             await update_nickname(m, p["coins"])
-            await interaction.followup.send(f"👤 <@{u_id}>: {status_text}\n💰 現在の所持金: {p['coins']}コイン")
+            await interaction.followup.send(f"👤 <@{u_id}> さん: {status_text}\n💰 現在の所持金: {p['coins']}コイン")
             
     race_bets[cid] = {}
 
@@ -299,15 +314,20 @@ async def odds(interaction: discord.Interaction):
     if not await check_channel(interaction, "GAMBLE"): return
     cid = interaction.channel.id
     if cid not in race_bets or not race_bets[cid]:
-        return await interaction.response.send_message("❌ まだ誰も賭けていません。", ephemeral=True)
+        # 誰も賭けていないときは、1〜4の乱数ベースだけの仮想オッズを見せる
+        dummy_bets = {i: 2 for i in horses.keys()} # 誰もいない時は一律でベースを設定
+        total_pool = sum(dummy_bets.values())
+        odds_text = "\n".join([f"{horses[h]}: {max(1.1, round(total_pool/pool, 1))}倍" for h, pool in dummy_bets.items()])
+        return await interaction.response.send_message(f"📊 **現在の予想オッズ（まだ誰も賭けていません）**\n{odds_text}")
     
-    total_pool = sum(b['bet'] for b in race_bets[cid].values())
-    horse_bets = {i: 0 for i in range(1, 7)}
+    # 誰かが賭けている場合は、固定の仮乱数（各馬に+2）を足して計算（本番レース開始時に変動します）
+    total_pool = sum(b['bet'] for b in race_bets[cid].values()) + (2 * len(horses))
+    horse_bets = {i: 2 for i in horses.keys()}
     for b in race_bets[cid].values(): horse_bets[b['horse']] += b['bet']
     
-    odds_text = "\n".join([f"{horses[h]}: {max(1.1, round(total_pool/pool, 1)) if pool>0 else '---'}倍" for h, pool in horse_bets.items()])
-    await interaction.response.send_message(f"📊 **現在のオッズ**\n{odds_text}")
-
+    odds_text = "\n".join([f"{horses[h]}: {max(1.1, round(total_pool/pool, 1))}倍" for h, pool in horse_bets.items()])
+    await interaction.response.send_message(f"📊 **現在の予想オッズ**\n{odds_text}")
+    
 @bot.tree.command(name="trade", description="他人にアイテムを売る/あげる")
 @app_commands.describe(member="相手", item_type="アイテム", price="価格(0で無料)")
 @app_commands.choices(item_type=[
@@ -322,7 +342,6 @@ async def trade(interaction: discord.Interaction, member: discord.Member, item_t
     
     if sender[item_type] <= 0:
         return await interaction.response.send_message("❌ そのアイテムを持っていません。", ephemeral=True)
-    
     if price > 0 and receiver["coins"] < price:
         return await interaction.response.send_message(f"❌ 相手の所持金が足りません。", ephemeral=True)
     
@@ -337,10 +356,9 @@ async def trade(interaction: discord.Interaction, member: discord.Member, item_t
     else:
         result_msg = f"{member.mention} にアイテムを譲渡しました！"
         
-    save_supabase_data(interaction.user.id, sender)  # 送り側のデータを保存
-    save_supabase_data(member.id, receiver)          # 受け取り側のデータを保存
+    save_supabase_data(interaction.user.id, sender)
+    save_supabase_data(member.id, receiver)
     await update_nickname(interaction.user, sender["coins"])
-    
     await interaction.response.send_message(result_msg, ephemeral=True)
 
 @bot.tree.command(name="compensation", description="【管理者用】ユーザーにコインを補填する")
@@ -348,41 +366,32 @@ async def trade(interaction: discord.Interaction, member: discord.Member, item_t
 async def compensation(interaction: discord.Interaction, member: discord.Member, coins: int):
     if interaction.channel.name != "運営さんの部屋":
         return await interaction.response.send_message("❌ このチャンネルでは補填コマンドは使用できません。", ephemeral=True)
-        
     if not interaction.user.guild_permissions.administrator:
         return await interaction.response.send_message("❌ あなたにはこのコマンドを実行する権限がありません。", ephemeral=True)
 
     p = get_user_profile(member.id)
     p["coins"] += coins
     
-    save_supabase_data(member.id, p)  # 補填データを保存
+    save_supabase_data(member.id, p)
     await update_nickname(member, p["coins"])
-    
     await interaction.response.send_message(
-        f"📢 【補填完了】\n"
-        f"{member.mention} に {coins} コインを補填しました。\n"
-        f"💰 相手の現在の所持金: {p['coins']} コイン"
+        f"📢 【補填完了】\n{member.mention} に {coins} コインを補填しました。\n💰 相手の現在の所持金: {p['coins']} コイン"
     )
+
 @bot.tree.command(name="backup", description="【管理者用】現在のデータベースのバックアップをチャンネルに出力します")
 async def backup(interaction: discord.Interaction):
-    # チャンネルチェック
     if not await check_channel(interaction, "BACKUP"): return
-    
-    # 管理者権限チェック
     if not interaction.user.guild_permissions.administrator:
         return await interaction.response.send_message("❌ あなたにはこのコマンドを実行する権限がありません。", ephemeral=True)
     
-    await interaction.response.defer(ephemeral=True) # 処理に時間がかかる場合があるので待たせる
+    await interaction.response.defer(ephemeral=True)
     
     try:
-        # Supabaseからすべてのユーザーデータを取得
         response = supabase.table("user_profiles").select("*").execute()
         data = response.data
-        
         if not data:
             return await interaction.followup.send("📁 データベースは空っぽです。", ephemeral=True)
             
-        # 読みやすいテキストに整形
         backup_text = f"📦 **【Supabase データベースデータ・バックアップ】**\n取得日時: <t:{int(time.time())}:F>\n------------------------------\n"
         for row in data:
             backup_text += (
@@ -391,20 +400,16 @@ async def backup(interaction: discord.Interaction):
                 f"------------------------------\n"
             )
             
-        # 文字数制限（2000文字）対策。もしデータが長すぎたら分割して送る
         if len(backup_text) > 1900:
-            # データが多すぎる場合は設定ファイル（JSON）風にしてファイルとして送信
             import io
             import json
             file_data = json.dumps(data, ensure_ascii=False, indent=4)
             file = discord.File(fp=io.StringIO(file_data), filename=f"backup_{int(time.time())}.json")
             await interaction.channel.send(content=f"📦 **【Supabase バックアップファイル】**\n取得日時: <t:{int(time.time())}:F>", file=file)
         else:
-            # 文字数に収まるならそのままメッセージとして投稿
             await interaction.channel.send(backup_text)
             
         await interaction.followup.send("✅ バックアップをチャンネルに出力しました！", ephemeral=True)
-        
     except Exception as e:
         await interaction.followup.send(f"❌ バックアップ作成中にエラーが発生しました: {e}", ephemeral=True)
 
