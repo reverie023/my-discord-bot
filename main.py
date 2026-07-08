@@ -378,25 +378,29 @@ async def chinchiro_solo(interaction: discord.Interaction, bet: int):
 @bot.tree.command(name="race_bet", description="競馬にベットします")
 @app_commands.describe(horse_num="賭ける馬の番号 (1〜4)", bet="賭けるコインの数")
 async def race_bet(interaction: discord.Interaction, horse_num: int, bet: int):
-    if not await check_channel(interaction, "GAMBLE"): return
-    if horse_num not in horses:
-        return await interaction.response.send_message("❌ 存在しない馬の番号です。1〜4の中から選んでください。", ephemeral=True)
-    if bet <= 0:
-        return await interaction.response.send_message("❌ 1コイン以上を賭けてください。", ephemeral=True)
+    if not await check_channel(interaction, "GAMBLE"): return[cite: 1]
+    if horse_num not in horses:[cite: 1]
+        return await interaction.response.send_message("❌ 存在しない馬の番号です。1〜4の中から選んでください。", ephemeral=True)[cite: 1]
+    if bet <= 0:[cite: 1]
+        return await interaction.response.send_message("❌ 1コイン以上を賭けてください。", ephemeral=True)[cite: 1]
 
-    cid = interaction.channel.id
-    if cid not in race_bets: race_bets[cid] = {}
+    cid = interaction.channel.id[cite: 1]
+    if cid not in race_bets: race_bets[cid] = {}[cite: 1]
     
-    p = get_user_profile(interaction.user.id)
-    if p["coins"] < bet: 
-        return await interaction.response.send_message(f"❌ コインが足りません。現在の所持金: {p['coins']}コイン", ephemeral=True)
+    p = get_user_profile(interaction.user.id)[cite: 1]
+    if p["coins"] < bet:[cite: 1]
+        return await interaction.response.send_message(f"❌ コインが足りません。現在の所持金: {p['coins']}コイン", ephemeral=True)[cite: 1]
     
-    p["coins"] -= bet
-    race_bets[cid][interaction.user.id] = {"horse": horse_num, "bet": bet}
+    p["coins"] -= bet[cite: 1]
+    race_bets[cid][interaction.user.id] = {"horse": horse_num, "bet": bet}[cite: 1]
     
-    save_supabase_data(interaction.user.id, p)
-    await update_nickname(interaction.user, p["coins"])
-    await interaction.response.send_message(f"🏁 **{horses[horse_num]}** に {bet}コイン 賭けました！ (残金: {p['coins']})", ephemeral=True)
+    save_supabase_data(interaction.user.id, p)[cite: 1]
+    await update_nickname(interaction.user, p["coins"])[cite: 1]
+    
+    # 📝 メンションをつけて全員に見えるように修正（ephemeral=True を削除）
+    await interaction.response.send_message(
+        f"🏁 **{interaction.user.mention}** さんが **{horses[horse_num]}** に `{bet}` コイン 賭けました！"
+    )
 
 @bot.tree.command(name="race_start", description="レースを開始します")
 async def race_start(interaction: discord.Interaction):
@@ -684,5 +688,138 @@ async def backup(interaction: discord.Interaction):
         await interaction.followup.send("✅ バックアップをチャンネルに出力しました！", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"❌ バックアップ作成中にエラーが発生しました: {e}", ephemeral=True)
+
+# --- 🃏 ハイ＆ロー用 UIボタンコンポーネント（1〜14版） ---
+class HighLowView(discord.ui.View):
+    def __init__(self, interaction: discord.Interaction, bet: int, current_num: int, streak: int, main_text: str):
+        super().__init__(timeout=60.0)
+        self.interaction = interaction
+        self.uid = interaction.user.id
+        self.bet = bet
+        self.current_num = current_num
+        self.streak = streak
+        self.main_text = main_text
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.uid:
+            await interaction.response.send_message("❌ これは他の人のゲームです！", ephemeral=True)
+            return False
+        return True
+
+    async def process_choice(self, interaction: discord.Interaction, choice: str):
+        await interaction.response.defer()
+        
+        # 📝 1〜14 の範囲で次の数字を決定
+        next_num = random.randint(1, 14)
+        while next_num == self.current_num:
+            next_num = random.randint(1, 14)
+
+        is_win = False
+        if choice == "HIGH" and next_num > self.current_num:
+            is_win = True
+        elif choice == "LOW" and next_num < self.current_num:
+            is_win = True
+
+        if is_win:
+            self.streak += 1
+            current_payout = self.bet * (2 ** self.streak)
+            
+            new_text = (
+                f"🃏 **【HIGH & LOW】（連続正解: {self.streak}回）**\n"
+                f"💰 現在の掛け金: `{self.bet}` コイン ➡️ **想定配当: `{current_payout}` コイン**\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"前回の数字: **[ {self.current_num} ]** ➡️ 次の数字: **[ {next_num} ]**\n"
+                f"✨ **的中！お見事！** 現在の倍率: `{2 ** self.streak}倍`\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"次の数字は **[ {next_num} ]** より高い？低い？（範囲: 1〜14）\n"
+                f"※ここでゲームを終了してコインを持ち帰る（利確）こともできます！"
+            )
+            
+            new_view = HighLowView(self.interaction, self.bet, next_num, self.streak, new_text)
+            await self.interaction.edit_original_response(content=new_text, view=new_view)
+            self.stop()
+        else:
+            profile = get_user_profile(self.uid)
+            await update_nickname(self.interaction.user, profile["coins"])
+            
+            lose_text = (
+                f"🃏 **【HIGH & LOW】（ゲームオーバー）**\n"
+                f"💰 賭け金: `{self.bet}` コイン\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"前回の数字: **[ {self.current_num} ]** ➡️ 次の数字: **[ {next_num} ]**\n"
+                f"💀 **残念…！予想が外れました。**\n"
+                f"💸 賭け金とこれまでの配当はすべて没収されました…。\n"
+                f"📉 現在の所持金: {profile['coins']} コイン"
+            )
+            await self.interaction.edit_original_response(content=lose_text, view=None)
+            self.stop()
+
+    @discord.ui.button(label="HIGH (高)", style=discord.ButtonStyle.primary, custom_id="hl_high")
+    async def high_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.process_choice(interaction, "HIGH")
+
+    @discord.ui.button(label="LOW (低)", style=discord.ButtonStyle.danger, custom_id="hl_low")
+    async def low_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.process_choice(interaction, "LOW")
+
+    @discord.ui.button(label="💰 コインを持ち帰る (利確)", style=discord.ButtonStyle.success, custom_id="hl_cashout")
+    async def cashout_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        
+        if self.streak == 0:
+            await interaction.followup.send("❌ まだ一度も正解していないため持ち帰れません！", ephemeral=True)
+            return
+
+        payout = self.bet * (2 ** self.streak)
+        profile = get_user_profile(self.uid)
+        profile["coins"] += payout
+        save_supabase_data(self.uid, profile)
+        await update_nickname(self.interaction.user, profile["coins"])
+
+        win_text = (
+            f"🃏 **【HIGH & LOW】（利確成功！）**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎉 賢い選択です！ゲームを終了しました。\n"
+            f"🔥 連続正解数: `{self.streak}` 回\n"
+            f"💰 **獲得配当:** `+{payout}` コイン\n"
+            f"📈 現在の所持金: {profile['coins']} コイン"
+        )
+        await self.interaction.edit_original_response(content=win_text, view=None)
+        self.stop()
+
+
+# --- 🎮 スラッシュコマンドの実装 ---
+@bot.tree.command(name="high_low", description="数字が現在より高いか低いかを当てるゲーム（自分だけに通知）")
+@app_commands.describe(bet="賭けるコインの数")
+async def high_low(interaction: discord.Interaction, bet: int):
+    if not await check_channel(interaction, "GAMBLE"): return
+    if bet <= 0:
+        return await interaction.response.send_message("❌ 1コイン以上を賭けてください", ephemeral=True)
+
+    uid = interaction.user.id
+    profile = get_user_profile(uid)
+    
+    if profile["coins"] < bet:
+        return await interaction.response.send_message(f"❌ コインが足りません（所持: {profile['coins']} コイン）", ephemeral=True)
+
+    profile["coins"] -= bet
+    save_supabase_data(uid, profile)
+    await update_nickname(interaction.user, profile["coins"])
+
+    # 📝 最初の数字も 1〜14 の範囲に変更
+    start_num = random.randint(1, 14)
+    
+    main_text = (
+        f"🃏 **【HIGH & LOW】（勝負開始）**\n"
+        f"💰 賭け金: `{bet}` コインを投入しました！\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"現在の数字: **[ {start_num} ]**（範囲: 1〜14）\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"次にオープンされるカードの数字は、**[ {start_num} ]** より\n"
+        f"📈 **【HIGH (高い)】** か 📉 **【LOW (低い)】** か選んでください！"
+    )
+
+    view = HighLowView(interaction, bet, start_num, 0, main_text)
+    await interaction.response.send_message(content=main_text, view=view, ephemeral=True)
 
 bot.run(os.getenv("DISCORD_TOKEN"))
