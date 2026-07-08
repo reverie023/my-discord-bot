@@ -378,26 +378,26 @@ async def chinchiro_solo(interaction: discord.Interaction, bet: int):
 @bot.tree.command(name="race_bet", description="競馬にベットします")
 @app_commands.describe(horse_num="賭ける馬の番号 (1〜4)", bet="賭けるコインの数")
 async def race_bet(interaction: discord.Interaction, horse_num: int, bet: int):
-    if not await check_channel(interaction, "GAMBLE"): return[cite: 1]
-    if horse_num not in horses:[cite: 1]
-        return await interaction.response.send_message("❌ 存在しない馬の番号です。1〜4の中から選んでください。", ephemeral=True)[cite: 1]
-    if bet <= 0:[cite: 1]
-        return await interaction.response.send_message("❌ 1コイン以上を賭けてください。", ephemeral=True)[cite: 1]
+    if not await check_channel(interaction, "GAMBLE"): return
+    if horse_num not in horses:
+        return await interaction.response.send_message("❌ 存在しない馬の番号です。1〜4の中から選んでください。", ephemeral=True)
+    if bet <= 0:
+        return await interaction.response.send_message("❌ 1コイン以上を賭けてください。", ephemeral=True)
 
-    cid = interaction.channel.id[cite: 1]
-    if cid not in race_bets: race_bets[cid] = {}[cite: 1]
+    cid = interaction.channel.id
+    if cid not in race_bets: race_bets[cid] = {}
     
-    p = get_user_profile(interaction.user.id)[cite: 1]
-    if p["coins"] < bet:[cite: 1]
-        return await interaction.response.send_message(f"❌ コインが足りません。現在の所持金: {p['coins']}コイン", ephemeral=True)[cite: 1]
+    p = get_user_profile(interaction.user.id)
+    if p["coins"] < bet:
+        return await interaction.response.send_message(f"❌ コインが足りません。現在の所持金: {p['coins']}コイン", ephemeral=True)
     
-    p["coins"] -= bet[cite: 1]
-    race_bets[cid][interaction.user.id] = {"horse": horse_num, "bet": bet}[cite: 1]
+    p["coins"] -= bet
+    race_bets[cid][interaction.user.id] = {"horse": horse_num, "bet": bet}
     
-    save_supabase_data(interaction.user.id, p)[cite: 1]
-    await update_nickname(interaction.user, p["coins"])[cite: 1]
+    save_supabase_data(interaction.user.id, p)
+    await update_nickname(interaction.user, p["coins"])
     
-    # 📝 メンションをつけて全員に見えるように修正（ephemeral=True を削除）
+    # 📝 メンションをつけて全員に見えるように修正
     await interaction.response.send_message(
         f"🏁 **{interaction.user.mention}** さんが **{horses[horse_num]}** に `{bet}` コイン 賭けました！"
     )
@@ -410,7 +410,6 @@ async def race_start(interaction: discord.Interaction):
         return await interaction.response.send_message("❌ まだ誰も賭けていないため、レースを開始できません。", ephemeral=True)
     
     # --- 🎲 馬ごとにちがうNPC金額（乱数）を個別に生成！ ---
-    # 毎レースごとに、1番馬〜4番馬それぞれにまったく別の金額（100〜400）がランダムに割り振られます
     npc_bets = {
         1: random.randint(100, 400),
         2: random.randint(100, 400),
@@ -418,15 +417,12 @@ async def race_start(interaction: discord.Interaction):
         4: random.randint(100, 400)
     }
     
-    # 総プール金の計算（プレイヤー全員の賭け金 ＋ 馬ごとに違うNPCの金額の合計）
     total_pool = sum(b['bet'] for b in race_bets[cid].values()) + sum(npc_bets.values())
     
-    # 各馬の最終賭け金を集計
     horse_bets = {i: npc_bets[i] for i in horses.keys()}
     for b in race_bets[cid].values(): 
         horse_bets[b['horse']] += b['bet']
     
-    # 最終確定オッズの計算
     odds_text = "\n".join([f"{horses[h]}: {max(1.1, round(total_pool/pool, 1))}倍" for h, pool in horse_bets.items()])
     
     await interaction.response.send_message(f"🟢 **ゲートオープン！ レースが開始されました！**\n【確定オッズ（馬別NPC投票含む）】\n{odds_text}")
@@ -464,16 +460,12 @@ async def odds(interaction: discord.Interaction):
     if not await check_channel(interaction, "GAMBLE"): return
     cid = interaction.channel.id
     
-    # --- 🎲 誰も賭けていない場合 ---
     if cid not in race_bets or not race_bets[cid]:
-        # 馬ごとにバラバラの乱数（100〜400コイン）をその場で生成してオッズを計算します
         dummy_bets = {i: random.randint(100, 400) for i in horses.keys()}
         total_pool = sum(dummy_bets.values())
         odds_text = "\n".join([f"{horses[h]}: {max(1.1, round(total_pool/pool, 1))}倍" for h, pool in dummy_bets.items()])
         return await interaction.response.send_message(f"📊 **現在の予想オッズ（まだ誰も賭けていません）**\n{odds_text}\n※確認するたびにNPCの投票状況が変わります！")
     
-    # --- 🎲 誰かがすでに賭けている場合 ---
-    # こちらも馬ごとにバラバラの仮NPC投票（100〜400の乱数）をその場で発生させてプレイヤーの賭け金と合算します
     dummy_bases = {i: random.randint(100, 400) for i in horses.keys()}
     total_pool = sum(b['bet'] for b in race_bets[cid].values()) + sum(dummy_bases.values())
     
@@ -546,18 +538,14 @@ async def slot(interaction: discord.Interaction, bet: int):
     if profile["coins"] < bet:
         return await interaction.response.send_message(f"❌ コインが足りません（所持: {profile['coins']} コイン）", ephemeral=True)
 
-    # コインを引く
     profile["coins"] -= bet
     save_supabase_data(uid, profile)
 
-    # スロットの絵文字
     emojis = ["🍒", "🔔", "🍉", "🍇", "⭐", "🎰", "💎"]
     
-    # 確率の設定（裏で先に結果を決定）
     is_pika = random.random() < 0.05
     is_win = is_pika or (random.random() < 0.20)
 
-    # 最終的な出目の決定
     if is_win:
         hit_emoji = random.choice(["🎰", "💎"]) if is_pika else random.choice(emojis)
         r1, r2, r3 = hit_emoji, hit_emoji, hit_emoji
@@ -566,10 +554,8 @@ async def slot(interaction: discord.Interaction, bet: int):
         r2 = random.choice([e for e in emojis if e != r1])
         r3 = random.choice([e for e in emojis if e != r2])
 
-    # 📝 【修正ポイント】ここで ephemeral=True を設定することで、このあとの演出がすべて自分専用になります！
     await interaction.response.send_message(f"🎰 **【SLOT MACHINE】** 💰\n🔥 賭け金: `{bet}` コイン を投入しました！", ephemeral=True)
     
-    # 最初は全部回転中（こちらも自分だけに見えるように ephemeral=True）
     msg = await interaction.followup.send(
         "✨ **リール回転中...** ✨\n"
         "━━━━━━━━━━\n"
@@ -582,35 +568,29 @@ async def slot(interaction: discord.Interaction, bet: int):
 
     await asyncio.sleep(0.8)
 
-    # 💡 【先ペカ演出】（ephemeral=True を追加）
     if is_pika:
         await interaction.followup.send("✨✨ーーー ⚡ **ズババババッ！！！** ⚡ ーーー✨✨", ephemeral=True)
         await asyncio.sleep(0.5)
         await interaction.followup.send("🎰✨🚨 **【 GOGO! 】ペカッ！！！** 🚨✨🎰\n（ボケェッ！と鳴り響く告知音！ボーナス確定！）", ephemeral=True)
         await asyncio.sleep(1.0)
 
-    # --- 🎰 リールを左から順番に止める演出 ---
-    # 1. 左リール停止
     for _ in range(2):
         await msg.edit(content=f"✨ **リール回転中...** ✨\n━━━━━━━━━━\n  🎰  |  🎰  |  🎰\n【 {random.choice(emojis)} 】|【 ⏳ 】|【 ⏳ 】\n━━━━━━━━━━")
         await asyncio.sleep(0.3)
     await msg.edit(content=f"✨ **左リール停止！** ✨\n━━━━━━━━━━\n  🎰  |  🎰  |  🎰\n【 {r1} 】|【 ⏳ 】|【 ⏳ 】\n━━━━━━━━━━")
     await asyncio.sleep(0.6)
 
-    # 2. 中リール停止
     for _ in range(2):
         await msg.edit(content=f"✨ **リール回転中...** ✨\n━━━━━━━━━━\n  🎰  |  🎰  |  🎰\n【 {r1} 】|【 {random.choice(emojis)} 】|【 ⏳ 】\n━━━━━━━━━━")
         await asyncio.sleep(0.3)
     await msg.edit(content=f"✨ **中リール停止！テンパイ…！？** ✨\n━━━━━━━━━━\n  🎰  |  🎰  |  🎰\n【 {r1} 】|【 {r2} 】|【 ⏳ 】\n━━━━━━━━━━")
     await asyncio.sleep(0.8)
 
-    # 3. 右リール停止（最終結果）
     for _ in range(2):
         await msg.edit(content=f"✨ **右リールが滑る...！** ✨\n━━━━━━━━━━\n  🎰  |  🎰  |  🎰\n【 {r1} 】|【 {r2} 】|【 {random.choice(emojis)} 】\n━━━━━━━━━━")
         await asyncio.sleep(0.3)
     await msg.edit(content=f"✨ **最終リール結果** ✨\n━━━━━━━━━━\n  🎰  |  🎰  |  🎰\n【 {r1} 】|【 {r2} 】|【 {r3} 】\n━━━━━━━━━━")
 
-    # 配当倍率チェック
     payout = 0
     result_text = ""
 
@@ -628,7 +608,6 @@ async def slot(interaction: discord.Interaction, bet: int):
             payout = bet * 3
             result_text = f"🔔 小役ゲット！【{r1}】揃い！"
     else:
-        # 💡 【後ペカ演出】（ephemeral=True を追加）
         if not is_win and random.random() < 0.03:
             await asyncio.sleep(0.5)
             await interaction.followup.send("……ん？ 違和感……。", ephemeral=True)
@@ -637,7 +616,6 @@ async def slot(interaction: discord.Interaction, bet: int):
             payout = bet * 8
             result_text = "😭ハズレからの… ⚡復活大逆転ボーナス！"
 
-    # 結果の反映
     if payout > 0:
         profile["coins"] += payout
         save_supabase_data(uid, profile)
@@ -805,7 +783,7 @@ async def high_low(interaction: discord.Interaction, bet: int):
     save_supabase_data(uid, profile)
     await update_nickname(interaction.user, profile["coins"])
 
-    # 📝 最初の数字だけは 2〜13 の間にして、必ずHIGHもLOWもある状態にする（罠対策）
+    # 最初の数字だけは 2〜13 の間にして、必ずHIGHもLOWもある状態にする（罠対策）
     start_num = random.randint(2, 13)
     
     main_text = (
