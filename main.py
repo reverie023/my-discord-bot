@@ -253,6 +253,119 @@ async def chinchiro_start(interaction: discord.Interaction):
     
     chinchiro_rooms[cid] = []
 
+@bot.tree.command(name="chinchiro_solo", description="コンピューターと対戦するソロチンチロ（自分だけに通知）")
+@app_commands.describe(bet="賭けるコインの数")
+async def chinchiro_solo(interaction: discord.Interaction, bet: int):
+    if not await check_channel(interaction, "GAMBLE"): return
+    if bet <= 0:
+        return await interaction.response.send_message("❌ 1コイン以上を賭けてください", ephemeral=True)
+
+    uid = interaction.user.id
+    profile = get_user_profile(uid)
+    
+    if profile["coins"] < bet:
+        return await interaction.response.send_message(f"❌ コインが足りません（所持: {profile['coins']} コイン）", ephemeral=True)
+
+    # コインを引く
+    profile["coins"] -= bet
+    save_supabase_data(uid, profile)
+
+    dice_emojis = {1: "⚀", 2: "⚁", 3: "⚂", 4: "⚃", 5: "⚄", 6: "⚅"}
+    
+    await interaction.response.send_message(
+        f"⚔️ **【ソロチンチロ勝負開始】** ⚔️\n"
+        f"👤 **{interaction.user.name}** vs 🤖 **コンピューター**\n"
+        f"💰 賭け金: `{bet}` コイン", 
+        ephemeral=True
+    )
+
+    # 🎲 サイコロを振る内部関数
+    async def roll_dice(player_name):
+        msg = await interaction.followup.send(f"🎲 *{player_name} がサイコロを振っています…*", ephemeral=True)
+        dices = []
+        for _ in range(3):
+            await asyncio.sleep(0.5)
+            dices.append(random.randint(1, 6))
+            current_emojis = " ".join([dice_emojis[d] for d in dices])
+            await msg.edit(content=f"🎲 {player_name} のサイコロ:  **{current_emojis}**")
+        return sorted(dices, reverse=True)
+
+    # 🔄 ターンを処理する関数（目なしなら最大3回）
+    async def play_turn(player_name):
+        score = -1
+        role = "💨 目なし"
+        
+        for attempt in range(1, 4):
+            if attempt > 1:
+                await interaction.followup.send(f"🔄 🤖 *コンピューターが空気を読んで {attempt}回目の振り直し中…*" if player_name == "🤖" else f"🔄 **{attempt}回目の振り直しです！**", ephemeral=True)
+                
+            dices = await roll_dice(player_name)
+            final_emojis = " ".join([dice_emojis[d] for d in dices])
+            
+            # 役判定
+            if sorted(dices) == [1, 2, 3]:
+                score = -999
+                role = "💀❌ **ヒフミ (一発即死負け!!!)**"
+                is_reroll = False
+            elif len(set(dices)) == 1:
+                score = dices[0] * 100
+                role = f"✨👑 **アラシ ({dices[0]}のゾロ目)!!**"
+                is_reroll = False
+            elif len(set(dices)) == 3:
+                score = -1
+                role = "💨 **目なし...**"
+                is_reroll = True
+            else:
+                score = dices[2] if dices[0] == dices[1] else dices[0]
+                role = f"🎯 **【 {score} の目 】**"
+                is_reroll = False
+
+            await interaction.followup.send(f"🎲 {player_name} ({attempt}回目): {final_emojis} ➡️ 結果: {role}", ephemeral=True)
+            
+            if not is_reroll:
+                break
+            if attempt == 3:
+                await interaction.followup.send(f"💥 {player_name} は3回すべて【目なし】で確定！", ephemeral=True)
+                
+        return score, role
+
+    # 1. プレイヤーのターン
+    await interaction.followup.send(f"\n━━━━━━━━━━━━━━━━━━━━━\n👤 **あなたのターン！**", ephemeral=True)
+    p_score, p_role = await play_turn(interaction.user.name)
+
+    # 2. コンピューターのターン
+    await asyncio.sleep(1.0)
+    await interaction.followup.send(f"\n━━━━━━━━━━━━━━━━━━━━━\n🤖 **コンピューターのターン！**", ephemeral=True)
+    c_score, c_role = await play_turn("🤖")
+
+    # 3. 結果発表
+    await asyncio.sleep(1.0)
+    await interaction.followup.send("\n👑━━━━━━━━━━━━━━━━━━━━━👑\n📊 **【 最終結果発表 】**", ephemeral=True)
+
+    if p_score == c_score:
+        profile["coins"] += bet  # コインを戻す
+        save_supabase_data(uid, profile)
+        await interaction.followup.send(f"🤝 **引き分け！** 賭け金 `{bet}` コインが戻されました。\n💰 所持金: {profile['coins']} コイン", ephemeral=True)
+    elif p_score > c_score:
+        payout = bet * 2
+        profile["coins"] += payout
+        save_supabase_data(uid, profile)
+        await update_nickname(interaction.user, profile["coins"])
+        await interaction.followup.send(
+            f"🏆 **あなたの勝ち！** 🌟\n"
+            f"💰 **獲得コイン:** `+{bet}` コイン（倍返し！）\n"
+            f"📈 **現在の所持金:** {profile['coins']} コイン",
+            ephemeral=True
+        )
+    else:
+        await update_nickname(interaction.user, profile["coins"])
+        await interaction.followup.send(
+            f"💀 **あなたの負け！** コンピューターの勝利です。\n"
+            f"💸 賭け金 `{bet}` コインを失いました…。\n"
+            f"📉 **現在の所持金:** {profile['coins']} コイン",
+            ephemeral=True
+        )
+
 # --- 🏇 競馬システム ---
 @bot.tree.command(name="race_bet", description="競馬にベットします")
 @app_commands.describe(horse_num="賭ける馬の番号 (1〜4)", bet="賭けるコインの数")
@@ -411,7 +524,7 @@ async def compensation(interaction: discord.Interaction, member: discord.Member,
 
 @bot.tree.command(name="slot", description="スロットマシンを回す（自分だけに通知・ペカり演出あり！）")
 async def slot(interaction: discord.Interaction, bet: int):
-    if not await check_channel(interaction, "SROT"): return 
+    if not await check_channel(interaction, "SLOT"): return 
     if bet <= 0:
         return await interaction.response.send_message("❌ 1コイン以上を賭けてください", ephemeral=True)
 
