@@ -263,22 +263,27 @@ async def race_start(interaction: discord.Interaction):
     if not race_bets.get(cid): 
         return await interaction.response.send_message("❌ まだ誰も賭けていないため、レースを開始できません。", ephemeral=True)
     
-    # --- 🎲 オッズ用のダミー賭け金（1〜4の乱数）を裏で生成 ---
-    # 毎回レースごとに、各馬に1〜4のランダムな額がベースとして賭けられている扱いにします
-    dummy_bets = {i: random.randint(1, 4) for i in horses.keys()}
+    # --- 🎲 馬ごとにちがうNPC金額（乱数）を個別に生成！ ---
+    # 毎レースごとに、1番馬〜4番馬それぞれにまったく別の金額（100〜400）がランダムに割り振られます
+    npc_bets = {
+        1: random.randint(100, 400),
+        2: random.randint(100, 400),
+        3: random.randint(100, 400),
+        4: random.randint(100, 400)
+    }
     
-    # 総プール金の計算（プレイヤー全員の賭け金 ＋ 乱数のベース合計）
-    total_pool = sum(b['bet'] for b in race_bets[cid].values()) + sum(dummy_bets.values())
+    # 総プール金の計算（プレイヤー全員の賭け金 ＋ 馬ごとに違うNPCの金額の合計）
+    total_pool = sum(b['bet'] for b in race_bets[cid].values()) + sum(npc_bets.values())
     
-    # 各馬の賭け金を集計
-    horse_bets = {i: dummy_bets[i] for i in horses.keys()} # 最初から乱数を入れておく
+    # 各馬の最終賭け金を集計
+    horse_bets = {i: npc_bets[i] for i in horses.keys()}
     for b in race_bets[cid].values(): 
         horse_bets[b['horse']] += b['bet']
     
-    # オッズの計算（1〜4の乱数が最初から入っているため、絶対に分母が0にならず倍率が出ます）
+    # 最終確定オッズの計算
     odds_text = "\n".join([f"{horses[h]}: {max(1.1, round(total_pool/pool, 1))}倍" for h, pool in horse_bets.items()])
     
-    await interaction.response.send_message(f"🟢 **ゲートオープン！ レースが開始されました！**\n【確定オッズ（NPC投票含む）】\n{odds_text}")
+    await interaction.response.send_message(f"🟢 **ゲートオープン！ レースが開始されました！**\n【確定オッズ（馬別NPC投票含む）】\n{odds_text}")
     msg = await interaction.followup.send("🏁 実況: 各馬一斉にスタートしました！")
     
     progress = {i: 0 for i in horses.keys()}
@@ -293,7 +298,6 @@ async def race_start(interaction: discord.Interaction):
     for u_id, b in race_bets[cid].items():
         p = get_user_profile(u_id)
         if b["horse"] == winner: 
-            # 配当計算時も、乱数を含んだ比率で計算します
             payout = int(b["bet"] * max(1.1, (total_pool / horse_bets[winner])))
             p["coins"] += payout
             status_text = f"🎉 お見事！予想的中です！ **+{payout}** コイン獲得！"
@@ -313,20 +317,26 @@ async def race_start(interaction: discord.Interaction):
 async def odds(interaction: discord.Interaction):
     if not await check_channel(interaction, "GAMBLE"): return
     cid = interaction.channel.id
+    
+    # --- 🎲 誰も賭けていない場合 ---
     if cid not in race_bets or not race_bets[cid]:
-        # 誰も賭けていないときは、1〜4の乱数ベースだけの仮想オッズを見せる
-        dummy_bets = {i: 2 for i in horses.keys()} # 誰もいない時は一律でベースを設定
+        # 馬ごとにバラバラの乱数（100〜400コイン）をその場で生成してオッズを計算します
+        dummy_bets = {i: random.randint(100, 400) for i in horses.keys()}
         total_pool = sum(dummy_bets.values())
         odds_text = "\n".join([f"{horses[h]}: {max(1.1, round(total_pool/pool, 1))}倍" for h, pool in dummy_bets.items()])
-        return await interaction.response.send_message(f"📊 **現在の予想オッズ（まだ誰も賭けていません）**\n{odds_text}")
+        return await interaction.response.send_message(f"📊 **現在の予想オッズ（まだ誰も賭けていません）**\n{odds_text}\n※確認するたびにNPCの投票状況が変わります！")
     
-    # 誰かが賭けている場合は、固定の仮乱数（各馬に+2）を足して計算（本番レース開始時に変動します）
-    total_pool = sum(b['bet'] for b in race_bets[cid].values()) + (2 * len(horses))
-    horse_bets = {i: 2 for i in horses.keys()}
-    for b in race_bets[cid].values(): horse_bets[b['horse']] += b['bet']
+    # --- 🎲 誰かがすでに賭けている場合 ---
+    # こちらも馬ごとにバラバラの仮NPC投票（100〜400の乱数）をその場で発生させてプレイヤーの賭け金と合算します
+    dummy_bases = {i: random.randint(100, 400) for i in horses.keys()}
+    total_pool = sum(b['bet'] for b in race_bets[cid].values()) + sum(dummy_bases.values())
+    
+    horse_bets = {i: dummy_bases[i] for i in horses.keys()}
+    for b in race_bets[cid].values(): 
+        horse_bets[b['horse']] += b['bet']
     
     odds_text = "\n".join([f"{horses[h]}: {max(1.1, round(total_pool/pool, 1))}倍" for h, pool in horse_bets.items()])
-    await interaction.response.send_message(f"📊 **現在の予想オッズ**\n{odds_text}")
+    await interaction.response.send_message(f"📊 **現在の予想オッズ（馬別NPC仮投票含む）**\n{odds_text}\n※レース開始時（/race_start）にNPCの再投票が行われるため、さらにオッズが変動します！")
     
 @bot.tree.command(name="trade", description="他人にアイテムを売る/あげる")
 @app_commands.describe(member="相手", item_type="アイテム", price="価格(0で無料)")
