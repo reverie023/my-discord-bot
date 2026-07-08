@@ -22,7 +22,7 @@ intents.message_content = True
 intents.voice_states = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-CHANNELS = {"GACHA": "ガチャ", "GAMBLE": "賭け場", "STATUS": "ステータス", "LOG": "通話履歴"}
+CHANNELS = {"GACHA": "ガチャ", "GAMBLE": "賭け場", "STATUS": "ステータス", "LOG": "通話履歴", "BACKUP": "データ保存"}
 race_bets = {}
 call_start_times = {}
 horses = {1: "🐴ドロボウキング", 2: "🐴オマモリマル", 3: "🐴チンチロマスター", 4: "🐴コゼニデント"}
@@ -363,5 +363,49 @@ async def compensation(interaction: discord.Interaction, member: discord.Member,
         f"{member.mention} に {coins} コインを補填しました。\n"
         f"💰 相手の現在の所持金: {p['coins']} コイン"
     )
+@bot.tree.command(name="backup", description="【管理者用】現在のデータベースのバックアップをチャンネルに出力します")
+async def backup(interaction: discord.Interaction):
+    # チャンネルチェック
+    if not await check_channel(interaction, "BACKUP"): return
+    
+    # 管理者権限チェック
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("❌ あなたにはこのコマンドを実行する権限がありません。", ephemeral=True)
+    
+    await interaction.response.defer(ephemeral=True) # 処理に時間がかかる場合があるので待たせる
+    
+    try:
+        # Supabaseからすべてのユーザーデータを取得
+        response = supabase.table("user_profiles").select("*").execute()
+        data = response.data
+        
+        if not data:
+            return await interaction.followup.send("📁 データベースは空っぽです。", ephemeral=True)
+            
+        # 読みやすいテキストに整形
+        backup_text = f"📦 **【Supabase データベースデータ・バックアップ】**\n取得日時: <t:{int(time.time())}:F>\n------------------------------\n"
+        for row in data:
+            backup_text += (
+                f"👤 ユーザーID: `{row['user_id']}`\n"
+                f"  💰 コイン: {row['coins']} | 🛡️ お守り: {row['shields']} | 🎫 チケット: {row['tickets']}\n"
+                f"------------------------------\n"
+            )
+            
+        # 文字数制限（2000文字）対策。もしデータが長すぎたら分割して送る
+        if len(backup_text) > 1900:
+            # データが多すぎる場合は設定ファイル（JSON）風にしてファイルとして送信
+            import io
+            import json
+            file_data = json.dumps(data, ensure_ascii=False, indent=4)
+            file = discord.File(fp=io.StringIO(file_data), filename=f"backup_{int(time.time())}.json")
+            await interaction.channel.send(content=f"📦 **【Supabase バックアップファイル】**\n取得日時: <t:{int(time.time())}:F>", file=file)
+        else:
+            # 文字数に収まるならそのままメッセージとして投稿
+            await interaction.channel.send(backup_text)
+            
+        await interaction.followup.send("✅ バックアップをチャンネルに出力しました！", ephemeral=True)
+        
+    except Exception as e:
+        await interaction.followup.send(f"❌ バックアップ作成中にエラーが発生しました: {e}", ephemeral=True)
 
 bot.run(os.getenv("DISCORD_TOKEN"))
