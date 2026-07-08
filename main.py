@@ -805,6 +805,7 @@ async def high_low(interaction: discord.Interaction, bet: int):
     save_supabase_data(uid, profile)
     await update_nickname(interaction.user, profile["coins"])
 
+    # 📝 最初の数字だけは 2〜13 の間にして、必ずHIGHもLOWもある状態にする（罠対策）
     start_num = random.randint(2, 13)
     
     main_text = (
