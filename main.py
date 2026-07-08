@@ -26,7 +26,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 CHANNELS = {"GACHA": "ガチャ", "GAMBLE": "賭け場", "STATUS": "ステータス", "LOG": "通話履歴", "BACKUP": "データ保存", "SLOT":"スロットマシーン"}
 race_bets = {}
 call_start_times = {}
-horses = {1: "🐴ドロボウキング", 2: "🐴オマモリマル", 3: "🐴チンチロマスター", 4: "🐴コゼニデント"}
+horses = {1: "🐴ドロボウキング", 2: "🐴オマモリマル", 3: "🐴チンチロマスター", 4: "🐴テイジュウロウ"}
 
 # --- 💾 Supabase 接続設定 ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -159,18 +159,80 @@ async def steal(interaction: discord.Interaction, target: discord.Member):
 
 chinchiro_rooms = {}
 
-@bot.tree.command(name="chinchiro_start", description="対人戦チンチロ開始")
+# --- 🎲 対人戦チンチロ用データ管理 ---
+if 'chinchiro_rooms' not in globals():
+    chinchiro_rooms = {}
+
+# 1. 【新規追加】チンチロの参加コマンド
+@bot.tree.command(name="chinchiro_join", description="対人戦チンチロの部屋に参加・ベットします")
+@app_commands.describe(bet="賭けるコインの数")
+async def chinchiro_join(interaction: discord.Interaction, bet: int):
+    if not await check_channel(interaction, "GAMBLE"): return
+    if bet <= 0:
+        return await interaction.response.send_message("❌ 1コイン以上を賭けてください", ephemeral=True)
+
+    uid = interaction.user.id
+    profile = get_user_profile(uid)
+    if profile["coins"] < bet:
+        return await interaction.response.send_message(f"❌ コインが足りません（所持: {profile['coins']} コイン）", ephemeral=True)
+
+    cid = interaction.channel.id
+    if cid not in chinchiro_rooms:
+        chinchiro_rooms[cid] = []
+
+    # 既に登録しているかチェック
+    if any(p["user"].id == uid for p in chinchiro_rooms[cid]):
+        return await interaction.response.send_message("❌ 既にこの部屋に参加しています", ephemeral=True)
+
+    if len(chinchiro_rooms[cid]) >= 2:
+        return await interaction.response.send_message("❌ この部屋は既に満員（2人）です。ゲームを開始するかキャンセルしてください", ephemeral=True)
+
+    # コインを一時的に引く
+    profile["coins"] -= bet
+    save_supabase_data(uid, profile)
+    await update_nickname(interaction.user, profile["coins"])
+
+    chinchiro_rooms[cid].append({"user": interaction.user, "bet": bet})
+    
+    current_count = len(chinchiro_rooms[cid])
+    await interaction.response.send_message(
+        f"🎲 **{interaction.user.mention}** さんが対人戦チンチロに参加しました！（賭け金: `{bet}` コイン）\n"
+        f"現在の参加人数: `{current_count}/2` 人\n"
+        f"※2人集まったら `/chinchiro_start` で勝負を開始できます！"
+    )
+
+# 2. 【新規追加】チンチロのキャンセルコマンド
+@bot.tree.command(name="chinchiro_cancel", description="対人戦チンチロの参加をキャンセルし、部屋を解散します")
+async def chinchiro_cancel(interaction: discord.Interaction):
+    if not await check_channel(interaction, "GAMBLE"): return
+    cid = interaction.channel.id
+    
+    if cid not in chinchiro_rooms or not chinchiro_rooms[cid]:
+        return await interaction.response.send_message("❌ 現在このチャンネルにアクティブな部屋はありません", ephemeral=True)
+
+    # 参加していた全員にコインを返却
+    for player in chinchiro_rooms[cid]:
+        p_profile = get_user_profile(player["user"].id)
+        p_profile["coins"] += player["bet"]
+        save_supabase_data(player["user"].id, p_profile)
+        await update_nickname(player["user"], p_profile["coins"])
+
+    chinchiro_rooms[cid] = []
+    await interaction.response.send_message("❌ 対人戦チンチロの部屋を解散し、賭け金を全員に返却しました。")
+
+# 3. 【修正版】チンチロのスタートコマンド（数字表示版）
+@bot.tree.command(name="chinchiro_start", description="対人戦チンチロ開始（2人の参加が必要です）")
 async def chinchiro_start(interaction: discord.Interaction):
     if not await check_channel(interaction, "GAMBLE"): return
     cid = interaction.channel.id
+    
     if cid not in chinchiro_rooms or len(chinchiro_rooms[cid]) < 2:
-        return await interaction.response.send_message("❌ 2人以上の参加が必要です", ephemeral=True)
+        return await interaction.response.send_message("❌ 対人戦を開始するには、2人が `/chinchiro_join` で参加する必要があります", ephemeral=True)
 
     p1, p2 = chinchiro_rooms[cid][0], chinchiro_rooms[cid][1]
     
-    await interaction.response.send_message(f"⚔️ **【チンチロ勝負開始】** ⚔️\n🔥 **{p1['user'].name}** (賭け金: {p1['bet']})  vs  🔥 **{p2['user'].name}** (賭け金: {p2['bet']})")
+    await interaction.response.send_message(f"⚔️ **【チンチロ対人戦 開始】** ⚔️\n🔥 **{p1['user'].name}** (賭け金: {p1['bet']})  vs  🔥 **{p2['user'].name}** (賭け金: {p2['bet']})")
 
-    # 🎲 サイコロを1回振る内部関数（数字表記に変更）
     async def roll_dice():
         msg = await interaction.followup.send("🎲 *ザワ…ザワ… サイコロを振っています…*")
         dices = []
@@ -185,7 +247,6 @@ async def chinchiro_start(interaction: discord.Interaction):
     for player in [p1, p2]:
         await interaction.followup.send(f"\n━━━━━━━━━━━━━━━━━━━━━\n👤 **{player['user'].name}** のターン！")
         
-        # 🔄 最大3回振るループ処理
         for attempt in range(1, 4):
             if attempt > 1:
                 await interaction.followup.send(f"🔄 **{attempt}回目の振り直しです！**")
@@ -193,11 +254,10 @@ async def chinchiro_start(interaction: discord.Interaction):
             dices = await roll_dice()
             final_emojis = ", ".join([str(d) for d in dices])
             
-            # 役の判定
             if sorted(dices) == [1, 2, 3]:
-                score = -999  # 最弱スコア
+                score = -999
                 role = "💀❌ **ヒフミ (一発即死負け!!!)**"
-                is_reroll_target = False  # 即確定
+                is_reroll_target = False
             elif len(set(dices)) == 1:
                 score = dices[0] * 100
                 role = f"✨👑 **アラシ ({dices[0]}のゾロ目)!!**"
@@ -205,7 +265,7 @@ async def chinchiro_start(interaction: discord.Interaction):
             elif len(set(dices)) == 3:
                 score = -1
                 role = "💨 **目なし...**"
-                is_reroll_target = True  # 振り直しOK
+                is_reroll_target = True
             else:
                 if dices[0] == dices[1]:
                     score = dices[2]
@@ -216,11 +276,9 @@ async def chinchiro_start(interaction: discord.Interaction):
 
             await interaction.followup.send(f"🎲 {attempt}回目出目: **[ {final_emojis} ]** ➡️ 結果: {role}")
             
-            # 振り直し対象（目なし）でなければ、ループを抜けて結果を確定
             if not is_reroll_target:
                 break
             
-            # 3回目も目なしだった場合
             if attempt == 3:
                 await interaction.followup.send(f"💥 3回すべて【目なし】のため、これで記録確定です！")
 
@@ -229,25 +287,40 @@ async def chinchiro_start(interaction: discord.Interaction):
     await asyncio.sleep(1.0)
     await interaction.followup.send("\n👑━━━━━━━━━━━━━━━━━━━━━👑\n📊 **【 最終結果発表 】**")
 
-    winner_id = max(res, key=lambda x: res[x]["score"])
-    loser_id = min(res, key=lambda x: res[x]["score"])
-    
-    if res[winner_id]["score"] == res[loser_id]["score"]:
-        await interaction.followup.send("🤝 **引き分け！** 賭け金は全員に戻されます。")
+    p1_data = res[p1['user'].id]
+    p2_data = res[p2['user'].id]
+
+    if p1_data["score"] == p2_data["score"]:
+        # 引き分け：双方にコインを返却
+        p1_profile = get_user_profile(p1['user'].id)
+        p2_profile = get_user_profile(p2['user'].id)
+        p1_profile["coins"] += p1['bet']
+        p2_profile["coins"] += p2['bet']
+        save_supabase_data(p1['user'].id, p1_profile)
+        save_supabase_data(p2['user'].id, p2_profile)
+        await update_nickname(p1['user'], p1_profile["coins"])
+        await update_nickname(p2['user'], p2_profile["coins"])
+        await interaction.followup.send("🤝 **引き分け！** 賭け金は全員に戻されました。")
     else:
-        pot = res[winner_id]["bet"]
+        winner_id = p1['user'].id if p1_data["score"] > p2_data["score"] else p2['user'].id
+        loser_id = p2['user'].id if winner_id == p1['user'].id else p1['user'].id
+        
         winner_p = get_user_profile(winner_id)
         loser_p = get_user_profile(loser_id)
-        winner_p["coins"] += pot
-        loser_p["coins"] -= pot
         
+        # 総取りルール（敗者の賭け金が勝者に入る）
+        pot = res[loser_id]["bet"]
+        winner_p["coins"] += (res[winner_id]["bet"] + pot) # 自分の賭け金+相手の賭け金
+        
+        # 敗者はjoin時にすでに引かれているので、ここでは引かない（勝者だけ戻す）
         save_supabase_data(winner_id, winner_p)
-        save_supabase_data(loser_id, loser_p)
+        
+        await update_nickname(interaction.guild.get_member(winner_id), winner_p["coins"])
         
         await interaction.followup.send(
             f"🏆 **勝者:** {res[winner_id]['name']} 🌟\n"
-            f"💰 **獲得コイン:** `+{pot}` コイン\n"
-            f"📈 **現在の所持金:** {winner_p['coins']} コイン"
+            f"💰 **獲得コイン:** `+{pot}` コイン（総取り！）\n"
+            f"📈 **勝者の現在の所持金:** {winner_p['coins']} コイン"
         )
     
     chinchiro_rooms[cid] = []
