@@ -709,7 +709,6 @@ class HighLowView(discord.ui.View):
     async def process_choice(self, interaction: discord.Interaction, choice: str):
         await interaction.response.defer()
         
-        # 📝 1〜14 の範囲で次の数字を決定
         next_num = random.randint(1, 14)
         while next_num == self.current_num:
             next_num = random.randint(1, 14)
@@ -806,8 +805,7 @@ async def high_low(interaction: discord.Interaction, bet: int):
     save_supabase_data(uid, profile)
     await update_nickname(interaction.user, profile["coins"])
 
-    # 📝 最初の数字も 1〜14 の範囲に変更
-    start_num = random.randint(1, 14)
+    start_num = random.randint(2, 13)
     
     main_text = (
         f"🃏 **【HIGH & LOW】（勝負開始）**\n"
