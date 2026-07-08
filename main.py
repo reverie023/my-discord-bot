@@ -667,7 +667,7 @@ async def backup(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(f"❌ バックアップ作成中にエラーが発生しました: {e}", ephemeral=True)
 
-# --- 🃏 ハイ＆ロー用 UIボタンコンポーネント（1〜14版） ---
+# --- 🃏 ハイ＆ロー用 UIボタンコンポーネント（1〜14・タイムアウト＆遅延対策版） ---
 class HighLowView(discord.ui.View):
     def __init__(self, interaction: discord.Interaction, bet: int, current_num: int, streak: int, main_text: str):
         super().__init__(timeout=60.0)
@@ -685,7 +685,9 @@ class HighLowView(discord.ui.View):
         return True
 
     async def process_choice(self, interaction: discord.Interaction, choice: str):
-        await interaction.response.defer()
+        # 📝 【最重要】ボタンが押されたら、何よりも先にDiscordへ受付完了の合図を送る（3秒エラー回避）
+        if not interaction.response.is_done():
+            await interaction.response.defer()
         
         next_num = random.randint(1, 14)
         while next_num == self.current_num:
@@ -741,11 +743,11 @@ class HighLowView(discord.ui.View):
 
     @discord.ui.button(label="💰 コインを持ち帰る (利確)", style=discord.ButtonStyle.success, custom_id="hl_cashout")
     async def cashout_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        
         if self.streak == 0:
-            await interaction.followup.send("❌ まだ一度も正解していないため持ち帰れません！", ephemeral=True)
-            return
+            return await interaction.response.send_message("❌ まだ一度も正解していないため持ち帰れません！", ephemeral=True)
+            
+        # 📝 ここでも即座に応答を返す
+        await interaction.response.defer()
 
         payout = self.bet * (2 ** self.streak)
         profile = get_user_profile(self.uid)
@@ -783,8 +785,20 @@ async def high_low(interaction: discord.Interaction, bet: int):
     save_supabase_data(uid, profile)
     await update_nickname(interaction.user, profile["coins"])
 
-    # 最初の数字だけは 2〜13 の間にして、必ずHIGHもLOWもある状態にする（罠対策）
     start_num = random.randint(2, 13)
+    
+    main_text = (
+        f"🃏 **【HIGH & LOW】（勝負開始）**\n"
+        f"💰 賭け金: `{bet}` コインを投入しました！\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"現在の数字: **[ {start_num} ]**（範囲: 1〜14）\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"次にオープンされるカードの数字は、**[ {start_num} ]** より\n"
+        f"📈 **【HIGH (高い)】** か 📉 **【LOW (低い)】** か選んでください！"
+    )
+
+    view = HighLowView(interaction, bet, start_num, 0, main_text)
+    await interaction.response.send_message(content=main_text, view=view, ephemeral=True)
     
     main_text = (
         f"🃏 **【HIGH & LOW】（勝負開始）**\n"
